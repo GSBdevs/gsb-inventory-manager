@@ -1,25 +1,28 @@
-# Fundação (Scaffold + Auth) — Implementation Plan
+# Fundação (Scaffold + Supabase Auth) — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the `inventory-manager` project skeleton — a runnable FastAPI backend with JWT/Argon2 auth and user management, plus a React/Vite/Tailwind frontend that logs in against it — mirroring the `gsb-crm` architecture.
+**Goal:** Stand up the `inventory-manager` project skeleton — a runnable FastAPI backend that authenticates with **Supabase Auth** (validates Supabase-issued JWTs, stores roles in a `profiles` table) and a React/Vite/Tailwind frontend that logs in via `@supabase/supabase-js`.
 
-**Architecture:** Async FastAPI + SQLAlchemy 2 (Postgres in prod, SQLite fallback in dev/tests) with a UUID+audit `TableBase`. Auth uses short-lived JWT access tokens + rotating refresh tokens (persisted for revocation) and Argon2id hashing. The React SPA talks to `/api/v1` through a single-flight refresh client and can be served single-origin by the API in production.
+**Architecture:** Async FastAPI + SQLAlchemy 2 (Supabase Postgres in prod via the session pooler, SQLite fallback in dev/tests) with a UUID+audit `TableBase`. Supabase Auth (GoTrue) owns users, passwords, sessions and refresh; the API only verifies the JWT (HS256 with the project JWT secret, `aud=authenticated`) and resolves a `profiles` row for the role. The first authenticated user is provisioned as `admin` (bootstrap); admins create further users through the Supabase Admin API.
 
-**Tech Stack:** Python ≥3.12, FastAPI, SQLAlchemy 2 async, Alembic, Pydantic v2 + pydantic-settings, PyJWT, pwdlib[argon2], aiosqlite, psycopg[binary]. Frontend: React 19, TypeScript ~5.7, Vite 6, Tailwind 4, TanStack Query 5, react-router 7.
+**Tech Stack:** Python ≥3.12, FastAPI, SQLAlchemy 2 async, Alembic, Pydantic v2 + pydantic-settings, PyJWT, httpx, aiosqlite, psycopg[binary]. Frontend: React 19, TypeScript ~5.7, Vite 6, Tailwind 4, TanStack Query 5, react-router 7, @supabase/supabase-js 2.
 
 ## Global Constraints
 
 - Product language pt-BR (UI strings, error messages, docs). Code identifiers and commits in English (conventional commits: `feat:`, `fix:`, `docs:`, `chore:`, `test:`).
 - Python `requires-python = ">=3.12"`; ruff `line-length = 100`, `target-version = "py312"`.
-- All DB tables inherit `TableBase` (UUID PK + `created_at`/`updated_at`).
+- All DB tables inherit `TableBase` (UUID PK + `created_at`/`updated_at`). **Exception:** `profiles.id` is the Supabase `auth.users.id` — it has **no** default generator (we never mint it).
 - Enums stored as NAME via `Enum(..., native_enum=False)` (SQLAlchemy) / `StrEnum` (Python).
-- User roles are exactly `admin` and `operador` (no others in this project).
+- User roles are exactly `admin` and `operador`.
+- Auth is Supabase Auth. The API has **no** login/refresh/logout endpoints — it only verifies the incoming JWT. JWT verification: HS256 with `settings.supabase_jwt_secret`, `audience="authenticated"`.
+- First-ever authenticated user (no `admin` profile exists yet) is provisioned as `admin`; all others as `operador`.
+- `SUPABASE_SERVICE_ROLE_KEY` is backend-only and never shipped to the frontend (frontend uses only the anon key).
 - Dark-only theme: neutrals black/gray + primary yellow `oklch(0.83 0.16 90)`; green/red semantic only.
-- Windows dev note: psycopg async needs `SelectorEventLoop` → run the API via `python run.py`, not `uvicorn app.main:app`, when using Postgres.
-- With `ENV != dev` and a dev `SECRET_KEY`, the API must refuse to boot.
+- Windows dev note: psycopg async needs `SelectorEventLoop` → run the API via `python run.py` when using Postgres.
+- With `ENV != dev` and a dev `SUPABASE_JWT_SECRET`, the API must refuse to boot.
 - API version prefix is `/api/v1`; docs at `/api/v1/docs`.
-- Tests use SQLite in-memory; run with `.venv\Scripts\python -m pytest` (Windows) / `python -m pytest`.
+- Tests use SQLite in-memory and mint HS256 tokens signed with `settings.supabase_jwt_secret`; the Supabase Admin client is replaced via `dependency_overrides`.
 
 ---
 
@@ -29,42 +32,47 @@
 inventory-manager/
   backend/
     pyproject.toml
-    run.py                       # dev entrypoint (Windows Selector loop)
+    run.py
     .env.example
     app/
       __init__.py
-      main.py                    # FastAPI app, lifespan, health, SPA mount
+      main.py
       core/
         __init__.py
-        config.py                # Settings (pydantic-settings)
-        aio.py                   # run(coro) with per-platform loop factory
+        config.py                # Settings incl. Supabase
+        aio.py                   # run(coro) per-platform loop factory
         database.py              # async engine + session_factory + get_db
-        security.py              # Argon2 hash + JWT create/decode
-        deps.py                  # DbSession, get_current_user, require_roles
+        security.py              # decode_supabase_jwt
+        supabase.py              # SupabaseAdmin (Admin API) + get_supabase_admin dep
+        deps.py                  # DbSession, get_current_user (+provision), require_roles
         pagination.py            # paginate(stmt) -> Page dict
       models/
-        __init__.py              # exports Base, TableBase, User, ... + utcnow
+        __init__.py              # exports Base, TableBase, utcnow, Profile, UserRole
         base.py                  # Base, TableBase, utcnow
-        user.py                  # User, UserRole, RefreshToken
+        profile.py               # Profile, UserRole
       schemas/
         __init__.py
         common.py                # UTCDateTime, Page[T]
-        auth.py                  # Login/Refresh/Token/Bootstrap/User schemas
+        profile.py               # ProfileOut, ProfileUpdate, UserCreate
       api/
         __init__.py
-        router.py                # aggregates module routers under /api/v1
-        auth.py                  # login/refresh/logout/me/bootstrap
+        router.py                # aggregates routers under /api/v1
+        auth.py                  # GET /auth/me
         users.py                 # admin CRUD
       services/
         __init__.py
     scripts/
-      seed.py                    # admin@gruposb.com / admin123
+      __init__.py
+      set_admin.py               # promote a profile to admin by email
     alembic.ini
     alembic/
       env.py
+      script.py.mako
       versions/
     tests/
+      __init__.py
       conftest.py                # in-memory DB + AsyncClient fixtures
+      helpers.py                 # make_token / auth_headers
       test_security.py
       test_auth.py
       test_users.py
@@ -74,26 +82,28 @@ inventory-manager/
     tsconfig.node.json
     vite.config.ts
     index.html
+    .env.example
     src/
-      main.tsx                   # QueryClientProvider + router + AuthProvider
-      App.tsx                    # routes + protected shell
-      index.css                  # Tailwind 4 + theme tokens
-      types.ts                   # TokenPair, User, Page<T>
+      main.tsx
+      App.tsx
+      index.css
+      types.ts
       vite-env.d.ts
       lib/
-        api.ts                   # fetch client + single-flight refresh
+        supabase.ts              # supabase-js client
+        api.ts                   # fetch client (token from Supabase session)
         utils.ts                 # cn()
       context/
-        auth.tsx                 # AuthProvider + useAuth
+        auth.tsx                 # AuthProvider (supabase-js) + useAuth
       components/
-        ui/                      # button, input, card, label (cva primitives)
+        ui/                      # button, input, card, label
         layout/
-          app-shell.tsx          # sidebar + topbar + <Outlet/>
+          app-shell.tsx
       pages/
         login.tsx
-        dashboard.tsx            # placeholder KPIs page
-  docker-compose.yml             # db(5433) + api + frontend
-  serve-lan.ps1                  # build front + single-origin serve
+        dashboard.tsx
+  docker-compose.yml             # api + frontend (DB/Auth = Supabase, external)
+  serve-lan.ps1
   README.md
   CLAUDE.md
   HANDOFF.md
@@ -101,7 +111,7 @@ inventory-manager/
 
 ---
 
-### Task 1: Backend skeleton — config, loop, database, base model, health
+### Task 1: Backend skeleton — config (incl. Supabase), loop, database, base model, health
 
 **Files:**
 - Create: `backend/pyproject.toml`, `backend/.env.example`, `backend/run.py`
@@ -112,7 +122,7 @@ inventory-manager/
 - Create: `backend/app/schemas/__init__.py`, `backend/app/services/__init__.py`
 
 **Interfaces:**
-- Produces: `settings` (`app.core.config`), `engine`/`session_factory`/`get_db` (`app.core.database`), `run(coro)` (`app.core.aio`), `Base`/`TableBase`/`utcnow` (`app.models.base` re-exported from `app.models`), `api_router` (`app.api.router`), `app` (`app.main`).
+- Produces: `settings` (`app.core.config`), `engine`/`session_factory`/`get_db` (`app.core.database`), `run(coro)` (`app.core.aio`), `Base`/`TableBase`/`utcnow` (`app.models`), `api_router` (`app.api.router`), `app` (`app.main`).
 
 - [ ] **Step 1: Create `backend/pyproject.toml`**
 
@@ -120,7 +130,7 @@ inventory-manager/
 [project]
 name = "inventory-manager-backend"
 version = "0.1.0"
-description = "Backend do Gerenciador de Estoque do Grupo SB — FastAPI + SQLAlchemy async"
+description = "Backend do Gerenciador de Estoque do Grupo SB — FastAPI + SQLAlchemy async + Supabase Auth"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
@@ -131,7 +141,7 @@ dependencies = [
     "pydantic-settings>=2.6",
     "email-validator>=2.2",
     "pyjwt>=2.10",
-    "pwdlib[argon2]>=0.2",
+    "httpx>=0.28",
     "aiosqlite>=0.20",
     "psycopg[binary]>=3.2",
 ]
@@ -140,7 +150,6 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
-    "httpx>=0.28",
     "ruff>=0.8",
 ]
 
@@ -177,10 +186,7 @@ class Settings(BaseSettings):
 
     app_name: str = "GrupoSB Estoque"
     env: str = "dev"
-    # >= 32 bytes exigidos pelo HS256; troque em produção.
-    secret_key: str = "dev-secret-troque-em-producao-0000000000"
 
-    # Bind do servidor (run.py). API_HOST=0.0.0.0 expõe na rede local.
     api_host: str = "127.0.0.1"
     api_port: int = 8000
 
@@ -188,14 +194,15 @@ class Settings(BaseSettings):
     # na raiz (origem única, sem CORS). Vazio = API pura (dev com Vite).
     frontend_dist: str = ""
 
-    access_token_expire_minutes: int = 15
-    refresh_token_expire_days: int = 7
+    # --- Supabase ---
+    supabase_url: str = ""  # ex.: https://xxxx.supabase.co
+    # JWT secret do projeto (Project Settings → API). Valida os tokens do Supabase Auth.
+    supabase_jwt_secret: str = "dev-supabase-jwt-secret-troque-000000000000"
+    # Service role key — SÓ no backend (cria usuários via Admin API). Nunca no front.
+    supabase_service_role_key: str = ""
 
-    # Rate-limit do login: nº de falhas por IP dentro da janela antes do 429.
-    login_max_failures: int = 10
-    login_window_seconds: int = 300
-
-    # Default de dev: SQLite local, zero infraestrutura. Produção/Docker: Postgres.
+    # Dev: SQLite local, zero infra. Produção: session pooler do Supabase
+    # (postgresql+psycopg://postgres.<ref>:<senha>@aws-...pooler.supabase.com:5432/postgres).
     database_url: str = "sqlite+aiosqlite:///./estoque_dev.db"
     auto_create_tables: bool = True
 
@@ -296,7 +303,7 @@ class TableBase(Base):
     )
 ```
 
-- [ ] **Step 6: Create `backend/app/models/__init__.py`** (User is added in Task 3; keep exports minimal now)
+- [ ] **Step 6: Create `backend/app/models/__init__.py`** (Profile is added in Task 3)
 
 ```python
 from app.models.base import Base, TableBase, utcnow
@@ -306,14 +313,9 @@ __all__ = ["Base", "TableBase", "utcnow"]
 
 - [ ] **Step 7: Create empty package markers and the router aggregator**
 
-`backend/app/__init__.py`: empty file.
-`backend/app/core/__init__.py`: empty file.
-`backend/app/schemas/__init__.py`: empty file.
-`backend/app/services/__init__.py`: empty file.
-`backend/app/api/__init__.py`: empty file.
+Empty files: `backend/app/__init__.py`, `backend/app/core/__init__.py`, `backend/app/schemas/__init__.py`, `backend/app/services/__init__.py`, `backend/app/api/__init__.py`.
 
 `backend/app/api/router.py`:
-
 ```python
 from fastapi import APIRouter
 
@@ -339,10 +341,10 @@ from app.models import Base
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if settings.env != "dev" and "dev-secret" in settings.secret_key:
+    if settings.env != "dev" and "dev-supabase-jwt-secret" in settings.supabase_jwt_secret:
         raise RuntimeError(
-            "SECRET_KEY de desenvolvimento com ENV != dev. "
-            'Gere uma chave: python -c "import secrets; print(secrets.token_urlsafe(48))"'
+            "SUPABASE_JWT_SECRET de desenvolvimento com ENV != dev. "
+            "Use o JWT secret real do projeto Supabase (Project Settings → API)."
         )
     if settings.auto_create_tables:
         async with engine.begin() as conn:
@@ -423,16 +425,20 @@ if __name__ == "__main__":
 - [ ] **Step 10: Create `backend/.env.example`**
 
 ```dotenv
-# Copie para .env e ajuste. SEM .env, o backend usa SQLite local (zero infra).
+# Copie para .env e ajuste. SEM .env, o backend usa SQLite local (zero infra),
+# mas o login real exige um projeto Supabase (ver SUPABASE_* abaixo).
 ENV=dev
-# Gere: python -c "import secrets; print(secrets.token_urlsafe(48))"
-SECRET_KEY=dev-secret-troque-em-producao-0000000000
 
 API_HOST=127.0.0.1
 API_PORT=8000
 
-# Postgres (docker compose expõe em 5433 pois a máquina tem PG nativo em 5432):
-# DATABASE_URL=postgresql+psycopg://estoque:estoque@localhost:5433/estoque
+# --- Supabase (Project Settings → API) ---
+SUPABASE_URL=https://SEU-REF.supabase.co
+SUPABASE_JWT_SECRET=dev-supabase-jwt-secret-troque-000000000000
+SUPABASE_SERVICE_ROLE_KEY=
+
+# Banco: dev usa SQLite; produção aponta para o SESSION POOLER do Supabase (porta 5432):
+# DATABASE_URL=postgresql+psycopg://postgres.SEU-REF:SENHA@aws-0-REGIAO.pooler.supabase.com:5432/postgres
 DATABASE_URL=sqlite+aiosqlite:///./estoque_dev.db
 AUTO_CREATE_TABLES=true
 
@@ -442,67 +448,73 @@ AUTO_CREATE_TABLES=true
 
 - [ ] **Step 11: Install and boot the API**
 
-Run:
-```bash
-cd backend && python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"
-```
-Then:
-```bash
-cd backend && .venv/Scripts/python run.py
-```
-Expected: server starts on `http://127.0.0.1:8000`; `GET http://127.0.0.1:8000/healthz` returns `{"status":"ok","env":"dev"}`. Stop the server (Ctrl+C) after confirming.
+Run: `cd backend && python -m venv .venv && .venv/Scripts/python -m pip install -e ".[dev]"`
+Then: `cd backend && .venv/Scripts/python run.py`
+Expected: server starts on `http://127.0.0.1:8000`; `GET /healthz` returns `{"status":"ok","env":"dev"}`. Stop after confirming.
 
 - [ ] **Step 12: Commit**
 
 ```bash
 git add backend/pyproject.toml backend/.env.example backend/run.py backend/app
-git commit -m "feat(backend): project skeleton with config, async db, base model and health"
+git commit -m "feat(backend): project skeleton with config (supabase), async db, base model and health"
 ```
 
 ---
 
-### Task 2: Security primitives (Argon2 + JWT)
+### Task 2: Supabase JWT verification
 
 **Files:**
 - Create: `backend/app/core/security.py`
-- Test: `backend/tests/test_security.py`
+- Create: `backend/tests/__init__.py` (empty), `backend/tests/test_security.py`
 
 **Interfaces:**
-- Produces: `hash_password(plain) -> str`, `verify_password(plain, hashed) -> bool`, `create_token_pair(user_id: str) -> dict` (keys: `access_token`, `refresh_token`, `token_type`, `expires_in`, `refresh_jti`, `refresh_expires_at`), `decode_token(token, expected_type) -> dict`, `TokenType = Literal["access","refresh"]`, `ALGORITHM = "HS256"`.
+- Consumes: `settings` (Task 1).
+- Produces: `decode_supabase_jwt(token: str) -> dict[str, Any]`, `SUPABASE_ALGORITHM = "HS256"`, `SUPABASE_AUDIENCE = "authenticated"`.
 
 - [ ] **Step 1: Write the failing test** — `backend/tests/test_security.py`
 
 ```python
+from datetime import datetime, timedelta, timezone
+
 import jwt
 import pytest
 
-from app.core.security import (
-    create_token_pair,
-    decode_token,
-    hash_password,
-    verify_password,
-)
+from app.core.config import settings
+from app.core.security import decode_supabase_jwt
 
 
-def test_hash_and_verify_password():
-    hashed = hash_password("segredo123")
-    assert hashed != "segredo123"
-    assert verify_password("segredo123", hashed)
-    assert not verify_password("errada", hashed)
+def _token(secret: str, aud: str = "authenticated", exp_delta: int = 3600) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": "11111111-1111-1111-1111-111111111111",
+        "email": "user@gruposb.com",
+        "aud": aud,
+        "role": "authenticated",
+        "iat": now,
+        "exp": now + timedelta(seconds=exp_delta),
+    }
+    return jwt.encode(payload, secret, algorithm="HS256")
 
 
-def test_token_pair_roundtrip():
-    pair = create_token_pair("user-42")
-    access = decode_token(pair["access_token"], "access")
-    refresh = decode_token(pair["refresh_token"], "refresh")
-    assert access["sub"] == "user-42"
-    assert refresh["jti"] == pair["refresh_jti"]
+def test_decodes_valid_supabase_token():
+    claims = decode_supabase_jwt(_token(settings.supabase_jwt_secret))
+    assert claims["sub"] == "11111111-1111-1111-1111-111111111111"
+    assert claims["email"] == "user@gruposb.com"
 
 
-def test_decode_rejects_wrong_type():
-    pair = create_token_pair("user-42")
+def test_rejects_wrong_secret():
     with pytest.raises(jwt.InvalidTokenError):
-        decode_token(pair["access_token"], "refresh")
+        decode_supabase_jwt(_token("outro-secret-invalido-000000000000"))
+
+
+def test_rejects_wrong_audience():
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_supabase_jwt(_token(settings.supabase_jwt_secret, aud="anon"))
+
+
+def test_rejects_expired_token():
+    with pytest.raises(jwt.InvalidTokenError):
+        decode_supabase_jwt(_token(settings.supabase_jwt_secret, exp_delta=-10))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -513,106 +525,68 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'app.core.security'`.
 - [ ] **Step 3: Create `backend/app/core/security.py`**
 
 ```python
-import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any
 
 import jwt
-from pwdlib import PasswordHash
 
 from app.core.config import settings
 
-ALGORITHM = "HS256"
-
-_password_hash = PasswordHash.recommended()  # Argon2id
-
-
-def hash_password(plain: str) -> str:
-    return _password_hash.hash(plain)
+SUPABASE_ALGORITHM = "HS256"
+SUPABASE_AUDIENCE = "authenticated"
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    return _password_hash.verify(plain, hashed)
+def decode_supabase_jwt(token: str) -> dict[str, Any]:
+    """Valida um JWT emitido pelo Supabase Auth (HS256 com o JWT secret do projeto).
 
-
-TokenType = Literal["access", "refresh"]
-
-
-def _create_token(
-    subject: str, token_type: TokenType, expires_delta: timedelta, jti: str | None = None
-) -> str:
-    now = datetime.now(timezone.utc)
-    payload: dict[str, Any] = {
-        "sub": subject,
-        "type": token_type,
-        "iat": now,
-        "exp": now + expires_delta,
-        "jti": jti or uuid.uuid4().hex,
-    }
-    return jwt.encode(payload, settings.secret_key, algorithm=ALGORITHM)
-
-
-def create_token_pair(user_id: str) -> dict[str, Any]:
-    """Gera o par access+refresh. O jti do refresh é exposto para persistência
-    (rotação/revogação); campos extras são filtrados pelo response_model."""
-    refresh_jti = uuid.uuid4().hex
-    refresh_expires = timedelta(days=settings.refresh_token_expire_days)
-    access = _create_token(
-        user_id, "access", timedelta(minutes=settings.access_token_expire_minutes)
+    Levanta jwt.InvalidTokenError (inclui ExpiredSignatureError/InvalidAudienceError)
+    quando o token é inválido, expirado ou tem audiência diferente de 'authenticated'.
+    """
+    return jwt.decode(
+        token,
+        settings.supabase_jwt_secret,
+        algorithms=[SUPABASE_ALGORITHM],
+        audience=SUPABASE_AUDIENCE,
     )
-    refresh = _create_token(user_id, "refresh", refresh_expires, jti=refresh_jti)
-    return {
-        "access_token": access,
-        "refresh_token": refresh,
-        "token_type": "bearer",
-        "expires_in": settings.access_token_expire_minutes * 60,
-        "refresh_jti": refresh_jti,
-        "refresh_expires_at": datetime.now(timezone.utc) + refresh_expires,
-    }
-
-
-def decode_token(token: str, expected_type: TokenType) -> dict[str, Any]:
-    """Decodifica e valida o token. Levanta jwt.InvalidTokenError se inválido/expirado."""
-    payload = jwt.decode(token, settings.secret_key, algorithms=[ALGORITHM])
-    if payload.get("type") != expected_type:
-        raise jwt.InvalidTokenError(f"esperado token '{expected_type}'")
-    return payload
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && .venv/Scripts/python -m pytest tests/test_security.py -v`
-Expected: 3 passed.
+Expected: 4 passed.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/core/security.py backend/tests/test_security.py
-git commit -m "feat(backend): Argon2 hashing and JWT access/refresh tokens"
+git add backend/app/core/security.py backend/tests/__init__.py backend/tests/test_security.py
+git commit -m "feat(backend): verify Supabase-issued JWTs (HS256, authenticated audience)"
 ```
 
 ---
 
-### Task 3: User & RefreshToken models, common + auth schemas, deps, pagination
+### Task 3: Profile model, schemas, Supabase admin client, deps, pagination
 
 **Files:**
-- Create: `backend/app/models/user.py`
+- Create: `backend/app/models/profile.py`
 - Modify: `backend/app/models/__init__.py`
-- Create: `backend/app/schemas/common.py`, `backend/app/schemas/auth.py`
-- Create: `backend/app/core/deps.py`, `backend/app/core/pagination.py`
+- Create: `backend/app/schemas/common.py`, `backend/app/schemas/profile.py`
+- Create: `backend/app/core/supabase.py`, `backend/app/core/deps.py`, `backend/app/core/pagination.py`
 
 **Interfaces:**
-- Consumes: `TableBase`, `utcnow` (Task 1); `decode_token` (Task 2).
-- Produces: `User` (fields: `id, email, full_name, hashed_password, role, is_active, created_at, updated_at`), `UserRole` (`ADMIN="admin"`, `OPERADOR="operador"`), `RefreshToken` (`user_id, jti, expires_at, revoked_at`); schemas `LoginIn, RefreshIn, TokenPair, BootstrapIn, UserCreate, UserUpdate, UserOut`; `UTCDateTime`, `Page[T]`; deps `DbSession`, `CurrentUser`, `get_current_user`, `require_roles`; `paginate`.
+- Consumes: `TableBase` (Task 1), `decode_supabase_jwt` (Task 2), `settings` (Task 1).
+- Produces:
+  - `UserRole` (`ADMIN="admin"`, `OPERADOR="operador"`), `Profile` (`id, email, full_name, role, is_active, created_at, updated_at`; `id` has NO default — it is the Supabase user id).
+  - `UTCDateTime`, `Page[T]`.
+  - `ProfileOut`, `ProfileUpdate`, `UserCreate`.
+  - `SupabaseAdmin` (async `create_user(email, password) -> str`), `get_supabase_admin() -> SupabaseAdmin`.
+  - `DbSession`, `CurrentUser`, `get_current_user`, `require_roles`; `paginate`.
 
-- [ ] **Step 1: Create `backend/app/models/user.py`**
+- [ ] **Step 1: Create `backend/app/models/profile.py`**
 
 ```python
 import uuid
-from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, String, Uuid
+from sqlalchemy import Boolean, Enum, String, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TableBase
@@ -623,38 +597,29 @@ class UserRole(StrEnum):
     OPERADOR = "operador"
 
 
-class User(TableBase):
-    __tablename__ = "users"
+class Profile(TableBase):
+    """Papel e metadados do usuário. A identidade (senha/login) vive no Supabase Auth;
+    `id` é o `auth.users.id` do Supabase — por isso, sem gerador default."""
 
-    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    __tablename__ = "profiles"
+
+    # Sobrescreve o id do TableBase para NÃO gerar UUID: recebemos o id do Supabase.
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), index=True, default="")
     full_name: Mapped[str] = mapped_column(String(255), default="")
-    hashed_password: Mapped[str] = mapped_column(String(255))
     role: Mapped[UserRole] = mapped_column(
         Enum(UserRole, native_enum=False, length=20), default=UserRole.OPERADOR
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-
-
-class RefreshToken(TableBase):
-    """Refresh tokens emitidos — habilita rotação e revogação (logout)."""
-
-    __tablename__ = "refresh_tokens"
-
-    user_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("users.id", ondelete="CASCADE"), index=True
-    )
-    jti: Mapped[str] = mapped_column(String(32), unique=True, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 ```
 
 - [ ] **Step 2: Update `backend/app/models/__init__.py`**
 
 ```python
 from app.models.base import Base, TableBase, utcnow
-from app.models.user import RefreshToken, User, UserRole
+from app.models.profile import Profile, UserRole
 
-__all__ = ["Base", "TableBase", "utcnow", "User", "UserRole", "RefreshToken"]
+__all__ = ["Base", "TableBase", "utcnow", "Profile", "UserRole"]
 ```
 
 - [ ] **Step 3: Create `backend/app/schemas/common.py`**
@@ -686,37 +651,32 @@ class Page(BaseModel, Generic[T]):
     size: int
 ```
 
-- [ ] **Step 4: Create `backend/app/schemas/auth.py`**
+- [ ] **Step 4: Create `backend/app/schemas/profile.py`**
 
 ```python
 import uuid
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
-from app.models.user import UserRole
+from app.models.profile import UserRole
 from app.schemas.common import UTCDateTime
 
 
-class LoginIn(BaseModel):
-    email: EmailStr
-    password: str
+class ProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    email: str
+    full_name: str
+    role: UserRole
+    is_active: bool
+    created_at: UTCDateTime
 
 
-class RefreshIn(BaseModel):
-    refresh_token: str
-
-
-class TokenPair(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    expires_in: int
-
-
-class BootstrapIn(BaseModel):
-    email: EmailStr
-    password: str = Field(min_length=6)
-    full_name: str = ""
+class ProfileUpdate(BaseModel):
+    full_name: str | None = None
+    role: UserRole | None = None
+    is_active: bool | None = None
 
 
 class UserCreate(BaseModel):
@@ -724,27 +684,51 @@ class UserCreate(BaseModel):
     password: str = Field(min_length=6)
     full_name: str = ""
     role: UserRole = UserRole.OPERADOR
-
-
-class UserUpdate(BaseModel):
-    full_name: str | None = None
-    role: UserRole | None = None
-    is_active: bool | None = None
-    password: str | None = Field(default=None, min_length=6)
-
-
-class UserOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: uuid.UUID
-    email: EmailStr
-    full_name: str
-    role: UserRole
-    is_active: bool
-    created_at: UTCDateTime
 ```
 
-- [ ] **Step 5: Create `backend/app/core/pagination.py`**
+- [ ] **Step 5: Create `backend/app/core/supabase.py`**
+
+```python
+import httpx
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+
+
+class SupabaseAdmin:
+    """Cliente da Admin API do Supabase Auth (usa a service role key).
+
+    Injetável via `get_supabase_admin` para ser substituído nos testes.
+    """
+
+    async def create_user(self, email: str, password: str) -> str:
+        """Cria um usuário no Supabase Auth e devolve o id (uuid) criado."""
+        if not settings.supabase_url or not settings.supabase_service_role_key:
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Supabase Admin não configurado (defina SUPABASE_URL e SERVICE_ROLE_KEY)",
+            )
+        headers = {
+            "apikey": settings.supabase_service_role_key,
+            "Authorization": f"Bearer {settings.supabase_service_role_key}",
+            "Content-Type": "application/json",
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{settings.supabase_url}/auth/v1/admin/users",
+                headers=headers,
+                json={"email": email, "password": password, "email_confirm": True},
+            )
+        if resp.status_code >= 400:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Supabase Admin: {resp.text}")
+        return resp.json()["id"]
+
+
+def get_supabase_admin() -> SupabaseAdmin:
+    return SupabaseAdmin()
+```
+
+- [ ] **Step 6: Create `backend/app/core/pagination.py`**
 
 ```python
 from typing import Any
@@ -763,7 +747,7 @@ async def paginate(
     return {"items": rows, "total": total, "page": page, "size": size}
 ```
 
-- [ ] **Step 6: Create `backend/app/core/deps.py`**
+- [ ] **Step 7: Create `backend/app/core/deps.py`**
 
 ```python
 import uuid
@@ -772,21 +756,39 @@ from typing import Annotated
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.security import decode_token
-from app.models.user import User, UserRole
+from app.core.security import decode_supabase_jwt
+from app.models import Profile, UserRole
 
 _bearer = HTTPBearer(auto_error=False)
 
 DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
+async def _provision_profile(db: AsyncSession, user_id: uuid.UUID, email: str) -> Profile:
+    """Carrega o perfil do usuário; cria no primeiro acesso. Se ainda não há nenhum
+    admin, o primeiro perfil provisionado vira admin (bootstrap)."""
+    profile = await db.get(Profile, user_id)
+    if profile is not None:
+        return profile
+    admin_count = await db.scalar(
+        select(func.count()).select_from(Profile).where(Profile.role == UserRole.ADMIN)
+    )
+    role = UserRole.ADMIN if not admin_count else UserRole.OPERADOR
+    profile = Profile(id=user_id, email=email or "", role=role)
+    db.add(profile)
+    await db.commit()
+    await db.refresh(profile)
+    return profile
+
+
 async def get_current_user(
     db: DbSession,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)] = None,
-) -> User:
+) -> Profile:
     unauthorized = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Credenciais inválidas ou ausentes",
@@ -795,22 +797,22 @@ async def get_current_user(
     if credentials is None:
         raise unauthorized
     try:
-        payload = decode_token(credentials.credentials, "access")
-        user_id = uuid.UUID(payload["sub"])
+        claims = decode_supabase_jwt(credentials.credentials)
+        user_id = uuid.UUID(claims["sub"])
     except (jwt.InvalidTokenError, KeyError, ValueError):
         raise unauthorized from None
 
-    user = await db.get(User, user_id)
-    if user is None or not user.is_active:
+    profile = await _provision_profile(db, user_id, claims.get("email", ""))
+    if not profile.is_active:
         raise unauthorized
-    return user
+    return profile
 
 
-CurrentUser = Annotated[User, Depends(get_current_user)]
+CurrentUser = Annotated[Profile, Depends(get_current_user)]
 
 
 def require_roles(*roles: UserRole):
-    async def _check(user: CurrentUser) -> User:
+    async def _check(user: CurrentUser) -> Profile:
         if user.role not in roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -821,32 +823,66 @@ def require_roles(*roles: UserRole):
     return Depends(_check)
 ```
 
-- [ ] **Step 7: Verify imports resolve**
+- [ ] **Step 8: Verify imports resolve**
 
-Run: `cd backend && .venv/Scripts/python -c "import app.core.deps, app.core.pagination, app.schemas.auth, app.models"`
+Run: `cd backend && .venv/Scripts/python -c "import app.core.deps, app.core.pagination, app.core.supabase, app.schemas.profile, app.models"`
 Expected: no output, exit code 0.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
-git add backend/app/models backend/app/schemas backend/app/core/deps.py backend/app/core/pagination.py
-git commit -m "feat(backend): user/refresh-token models, auth schemas, deps and pagination"
+git add backend/app/models backend/app/schemas backend/app/core/supabase.py backend/app/core/deps.py backend/app/core/pagination.py
+git commit -m "feat(backend): profile model/schemas, supabase admin client, deps and pagination"
 ```
 
 ---
 
-### Task 4: Auth router (login/refresh/logout/me/bootstrap) + rate limit + tests
+### Task 4: Auth router (GET /auth/me) + test fixtures + tests
 
 **Files:**
 - Create: `backend/app/api/auth.py`
 - Modify: `backend/app/api/router.py`
-- Create: `backend/tests/conftest.py`, `backend/tests/test_auth.py`
+- Create: `backend/tests/conftest.py`, `backend/tests/helpers.py`, `backend/tests/test_auth.py`
 
 **Interfaces:**
-- Consumes: `create_token_pair, decode_token, hash_password, verify_password` (Task 2); `User, RefreshToken, UserRole, utcnow` (Task 3); `CurrentUser, DbSession` (Task 3); schemas (Task 3); `settings` (Task 1).
-- Produces: router with `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`, `POST /auth/bootstrap`; test fixtures `client` (httpx AsyncClient) and `db_session`.
+- Consumes: `CurrentUser` (Task 3), `ProfileOut` (Task 3).
+- Produces: router with `GET /auth/me`; test fixtures `client`, `db_session`; helpers `make_token(...)`, `auth_headers(...)`.
 
-- [ ] **Step 1: Create `backend/tests/conftest.py`**
+- [ ] **Step 1: Create `backend/tests/helpers.py`**
+
+```python
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import jwt
+
+from app.core.config import settings
+
+
+def make_token(
+    sub: str | None = None,
+    email: str = "user@gruposb.com",
+    aud: str = "authenticated",
+    secret: str | None = None,
+) -> str:
+    """Emite um JWT no formato do Supabase, assinado com o secret de teste."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": sub or str(uuid.uuid4()),
+        "email": email,
+        "aud": aud,
+        "role": "authenticated",
+        "iat": now,
+        "exp": now + timedelta(hours=1),
+    }
+    return jwt.encode(payload, secret or settings.supabase_jwt_secret, algorithm="HS256")
+
+
+def auth_headers(**kwargs) -> dict[str, str]:
+    return {"Authorization": f"Bearer {make_token(**kwargs)}"}
+```
+
+- [ ] **Step 2: Create `backend/tests/conftest.py`**
 
 ```python
 from collections.abc import AsyncGenerator
@@ -891,217 +927,67 @@ async def client(_engine) -> AsyncGenerator[AsyncClient, None]:
     app.dependency_overrides.clear()
 ```
 
-- [ ] **Step 2: Write the failing test** — `backend/tests/test_auth.py`
+- [ ] **Step 3: Write the failing test** — `backend/tests/test_auth.py`
 
 ```python
-import pytest
+from tests.helpers import auth_headers, make_token
 
 
-@pytest.fixture
-async def bootstrapped(client):
-    resp = await client.post(
-        "/api/v1/auth/bootstrap",
-        json={"email": "admin@gruposb.com", "password": "admin123", "full_name": "Admin"},
-    )
-    assert resp.status_code == 201
-    return resp.json()
-
-
-async def test_bootstrap_creates_first_admin_then_conflicts(client):
-    first = await client.post(
-        "/api/v1/auth/bootstrap",
-        json={"email": "admin@gruposb.com", "password": "admin123"},
-    )
-    assert first.status_code == 201
-    assert "access_token" in first.json()
-
-    second = await client.post(
-        "/api/v1/auth/bootstrap",
-        json={"email": "outro@gruposb.com", "password": "admin123"},
-    )
-    assert second.status_code == 409
-
-
-async def test_login_success_and_me(client, bootstrapped):
-    resp = await client.post(
-        "/api/v1/auth/login",
-        json={"email": "admin@gruposb.com", "password": "admin123"},
-    )
+async def test_me_provisions_first_user_as_admin(client):
+    resp = await client.get("/api/v1/auth/me", headers=auth_headers(email="admin@gruposb.com"))
     assert resp.status_code == 200
-    access = resp.json()["access_token"]
-
-    me = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {access}"})
-    assert me.status_code == 200
-    assert me.json()["email"] == "admin@gruposb.com"
-    assert me.json()["role"] == "admin"
+    body = resp.json()
+    assert body["email"] == "admin@gruposb.com"
+    assert body["role"] == "admin"
 
 
-async def test_login_wrong_password(client, bootstrapped):
-    resp = await client.post(
-        "/api/v1/auth/login",
-        json={"email": "admin@gruposb.com", "password": "errada"},
-    )
+async def test_second_user_is_operador(client):
+    await client.get("/api/v1/auth/me", headers=auth_headers(email="admin@gruposb.com"))
+    resp = await client.get("/api/v1/auth/me", headers=auth_headers(email="op@gruposb.com"))
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "operador"
+
+
+async def test_me_without_token_is_401(client):
+    resp = await client.get("/api/v1/auth/me")
     assert resp.status_code == 401
 
 
-async def test_refresh_rotates_and_revokes_old(client, bootstrapped):
-    login = await client.post(
-        "/api/v1/auth/login",
-        json={"email": "admin@gruposb.com", "password": "admin123"},
-    )
-    old_refresh = login.json()["refresh_token"]
-
-    first = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
-    assert first.status_code == 200
-
-    # Reusar o refresh antigo (já rotacionado) deve falhar.
-    reused = await client.post("/api/v1/auth/refresh", json={"refresh_token": old_refresh})
-    assert reused.status_code == 401
+async def test_me_with_bad_secret_is_401(client):
+    token = make_token(secret="outro-secret-invalido-000000000000")
+    resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 401
 
 
-async def test_me_requires_auth(client):
-    resp = await client.get("/api/v1/auth/me")
+async def test_me_with_wrong_audience_is_401(client):
+    token = make_token(aud="anon")
+    resp = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 401
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [ ] **Step 4: Run test to verify it fails**
 
 Run: `cd backend && .venv/Scripts/python -m pytest tests/test_auth.py -v`
-Expected: FAIL — bootstrap returns 404 (route not registered yet).
+Expected: FAIL — `GET /auth/me` returns 404 (route not registered).
 
-- [ ] **Step 4: Create `backend/app/api/auth.py`**
+- [ ] **Step 5: Create `backend/app/api/auth.py`**
 
 ```python
-import time
-import uuid
-from collections import defaultdict, deque
+from fastapi import APIRouter
 
-import jwt
-from fastapi import APIRouter, HTTPException, Request, status
-from sqlalchemy import func, select
-
-from app.core.config import settings
-from app.core.deps import CurrentUser, DbSession
-from app.core.security import create_token_pair, decode_token, hash_password, verify_password
-from app.models import RefreshToken, User, UserRole, utcnow
-from app.schemas.auth import BootstrapIn, LoginIn, RefreshIn, TokenPair, UserOut
+from app.core.deps import CurrentUser
+from app.schemas.profile import ProfileOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# Rate-limit de login por IP, em memória (suficiente p/ 1 processo). Só falhas contam.
-_login_failures: dict[str, deque[float]] = defaultdict(deque)
 
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
-def _check_login_rate(ip: str) -> None:
-    window = _login_failures[ip]
-    cutoff = time.monotonic() - settings.login_window_seconds
-    while window and window[0] < cutoff:
-        window.popleft()
-    if len(window) >= settings.login_max_failures:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS,
-            "Muitas tentativas de login — aguarde alguns minutos",
-        )
-
-
-def _register_login_failure(ip: str) -> None:
-    _login_failures[ip].append(time.monotonic())
-
-
-def _reset_login_failures(ip: str) -> None:
-    _login_failures.pop(ip, None)
-
-
-async def _issue_tokens(db: DbSession, user: User) -> dict:
-    pair = create_token_pair(str(user.id))
-    db.add(
-        RefreshToken(
-            user_id=user.id, jti=pair["refresh_jti"], expires_at=pair["refresh_expires_at"]
-        )
-    )
-    await db.commit()
-    return pair
-
-
-@router.post("/login", response_model=TokenPair)
-async def login(data: LoginIn, db: DbSession, request: Request):
-    ip = _client_ip(request)
-    _check_login_rate(ip)
-    user = await db.scalar(select(User).where(User.email == data.email))
-    if user is None or not verify_password(data.password, user.hashed_password):
-        _register_login_failure(ip)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Email ou senha incorretos")
-    if not user.is_active:
-        _register_login_failure(ip)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuário desativado")
-    _reset_login_failures(ip)
-    return await _issue_tokens(db, user)
-
-
-@router.post("/refresh", response_model=TokenPair)
-async def refresh(data: RefreshIn, db: DbSession):
-    unauthorized = HTTPException(
-        status.HTTP_401_UNAUTHORIZED, "Refresh token inválido ou expirado"
-    )
-    try:
-        payload = decode_token(data.refresh_token, "refresh")
-        user_id = uuid.UUID(payload["sub"])
-        jti = payload["jti"]
-    except (jwt.InvalidTokenError, KeyError, ValueError):
-        raise unauthorized from None
-
-    token_row = await db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
-    if token_row is None or token_row.revoked_at is not None:
-        raise unauthorized
-
-    user = await db.get(User, user_id)
-    if user is None or not user.is_active:
-        raise unauthorized
-
-    token_row.revoked_at = utcnow()  # rotação: revoga o refresh usado
-    return await _issue_tokens(db, user)
-
-
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(data: RefreshIn, db: DbSession):
-    try:
-        payload = decode_token(data.refresh_token, "refresh")
-        jti = payload["jti"]
-    except (jwt.InvalidTokenError, KeyError):
-        return
-    token_row = await db.scalar(select(RefreshToken).where(RefreshToken.jti == jti))
-    if token_row is not None and token_row.revoked_at is None:
-        token_row.revoked_at = utcnow()
-        await db.commit()
-
-
-@router.get("/me", response_model=UserOut)
+@router.get("/me", response_model=ProfileOut)
 async def me(user: CurrentUser):
+    """Perfil do usuário atual. Provisiona o registro em `profiles` no 1º acesso."""
     return user
-
-
-@router.post("/bootstrap", response_model=TokenPair, status_code=status.HTTP_201_CREATED)
-async def bootstrap(data: BootstrapIn, db: DbSession):
-    """Cria o primeiro usuário (admin). Disponível apenas com a base vazia."""
-    count = await db.scalar(select(func.count()).select_from(User))
-    if count:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Já existem usuários cadastrados")
-    user = User(
-        email=data.email,
-        full_name=data.full_name,
-        hashed_password=hash_password(data.password),
-        role=UserRole.ADMIN,
-    )
-    db.add(user)
-    await db.commit()
-    return await _issue_tokens(db, user)
 ```
 
-- [ ] **Step 5: Register the router** — update `backend/app/api/router.py`
+- [ ] **Step 6: Register the router** — update `backend/app/api/router.py`
 
 ```python
 from fastapi import APIRouter
@@ -1112,21 +998,21 @@ api_router = APIRouter()
 api_router.include_router(auth.router)
 ```
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 7: Run tests to verify they pass**
 
 Run: `cd backend && .venv/Scripts/python -m pytest tests/test_auth.py -v`
 Expected: 5 passed.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add backend/app/api/auth.py backend/app/api/router.py backend/tests/conftest.py backend/tests/test_auth.py
-git commit -m "feat(backend): auth endpoints with rotating refresh and login rate limit"
+git add backend/app/api/auth.py backend/app/api/router.py backend/tests/conftest.py backend/tests/helpers.py backend/tests/test_auth.py
+git commit -m "feat(backend): /auth/me with profile provisioning and first-user admin bootstrap"
 ```
 
 ---
 
-### Task 5: Users admin CRUD router + tests
+### Task 5: Users admin CRUD (list/patch + create via Supabase Admin API) + tests
 
 **Files:**
 - Create: `backend/app/api/users.py`
@@ -1134,80 +1020,88 @@ git commit -m "feat(backend): auth endpoints with rotating refresh and login rat
 - Create: `backend/tests/test_users.py`
 
 **Interfaces:**
-- Consumes: `DbSession`, `require_roles`, `get_current_user` (Task 3); `paginate` (Task 3); `hash_password` (Task 2); `User, UserRole` (Task 3); `Page`, `UserCreate, UserUpdate, UserOut` (Task 3).
-- Produces: router with `GET /users` (admin, paginated), `POST /users` (admin), `PATCH /users/{id}` (admin).
+- Consumes: `DbSession`, `require_roles` (Task 3); `paginate` (Task 3); `SupabaseAdmin`, `get_supabase_admin` (Task 3); `Profile`, `UserRole` (Task 3); `Page`, `ProfileOut`, `ProfileUpdate`, `UserCreate` (Task 3); helpers (Task 4).
+- Produces: router with `GET /users` (admin, paginated), `POST /users` (admin, creates in Supabase + profile), `PATCH /users/{id}` (admin).
 
 - [ ] **Step 1: Write the failing test** — `backend/tests/test_users.py`
 
 ```python
+import uuid
+
 import pytest
+
+from app.core.supabase import get_supabase_admin
+from app.main import app
+from tests.helpers import auth_headers
+
+ADMIN_SUB = "11111111-1111-1111-1111-111111111111"
+OP_SUB = "22222222-2222-2222-2222-222222222222"
+
+
+class _FakeAdmin:
+    async def create_user(self, email: str, password: str) -> str:
+        return str(uuid.uuid4())
 
 
 @pytest.fixture
-async def admin_token(client):
-    resp = await client.post(
-        "/api/v1/auth/bootstrap",
-        json={"email": "admin@gruposb.com", "password": "admin123", "full_name": "Admin"},
-    )
-    return resp.json()["access_token"]
+def admin_client(client):
+    app.dependency_overrides[get_supabase_admin] = lambda: _FakeAdmin()
+    return client
 
 
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+async def _become_admin(admin_client):
+    # 1º usuário autenticado é provisionado como admin (bootstrap).
+    await admin_client.get("/api/v1/auth/me", headers=auth_headers(sub=ADMIN_SUB, email="admin@gruposb.com"))
 
 
-async def test_admin_creates_and_lists_users(client, admin_token):
-    created = await client.post(
+async def test_admin_creates_and_lists_users(admin_client):
+    await _become_admin(admin_client)
+    created = await admin_client.post(
         "/api/v1/users",
-        headers=_auth(admin_token),
+        headers=auth_headers(sub=ADMIN_SUB),
         json={"email": "op@gruposb.com", "password": "op12345", "role": "operador"},
     )
     assert created.status_code == 201
     assert created.json()["role"] == "operador"
 
-    listing = await client.get("/api/v1/users", headers=_auth(admin_token))
+    listing = await admin_client.get("/api/v1/users", headers=auth_headers(sub=ADMIN_SUB))
     assert listing.status_code == 200
     assert listing.json()["total"] == 2  # admin + operador
 
 
-async def test_operador_cannot_manage_users(client, admin_token):
-    await client.post(
-        "/api/v1/users",
-        headers=_auth(admin_token),
-        json={"email": "op@gruposb.com", "password": "op12345", "role": "operador"},
-    )
-    op_login = await client.post(
-        "/api/v1/auth/login", json={"email": "op@gruposb.com", "password": "op12345"}
-    )
-    op_token = op_login.json()["access_token"]
-
-    resp = await client.get("/api/v1/users", headers=_auth(op_token))
+async def test_operador_cannot_manage_users(admin_client):
+    await _become_admin(admin_client)
+    # Provisiona um operador (2º usuário) e usa o token dele.
+    await admin_client.get("/api/v1/auth/me", headers=auth_headers(sub=OP_SUB, email="op2@gruposb.com"))
+    resp = await admin_client.get("/api/v1/users", headers=auth_headers(sub=OP_SUB))
     assert resp.status_code == 403
 
 
-async def test_create_rejects_duplicate_email(client, admin_token):
+async def test_create_rejects_duplicate_email(admin_client):
+    await _become_admin(admin_client)
     payload = {"email": "dup@gruposb.com", "password": "dup12345"}
-    first = await client.post("/api/v1/users", headers=_auth(admin_token), json=payload)
+    first = await admin_client.post("/api/v1/users", headers=auth_headers(sub=ADMIN_SUB), json=payload)
     assert first.status_code == 201
-    second = await client.post("/api/v1/users", headers=_auth(admin_token), json=payload)
+    second = await admin_client.post("/api/v1/users", headers=auth_headers(sub=ADMIN_SUB), json=payload)
     assert second.status_code == 409
 
 
-async def test_admin_updates_user(client, admin_token):
-    created = await client.post(
+async def test_admin_updates_user(admin_client):
+    await _become_admin(admin_client)
+    created = await admin_client.post(
         "/api/v1/users",
-        headers=_auth(admin_token),
+        headers=auth_headers(sub=ADMIN_SUB),
         json={"email": "op@gruposb.com", "password": "op12345"},
     )
     user_id = created.json()["id"]
-    resp = await client.patch(
+    resp = await admin_client.patch(
         f"/api/v1/users/{user_id}",
-        headers=_auth(admin_token),
-        json={"is_active": False, "full_name": "Operador Um"},
+        headers=auth_headers(sub=ADMIN_SUB),
+        json={"role": "admin", "is_active": False},
     )
     assert resp.status_code == 200
+    assert resp.json()["role"] == "admin"
     assert resp.json()["is_active"] is False
-    assert resp.json()["full_name"] == "Operador Um"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1219,63 +1113,62 @@ Expected: FAIL — `POST /users` returns 404.
 
 ```python
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import or_, select
 
 from app.core.deps import DbSession, require_roles
 from app.core.pagination import paginate
-from app.core.security import hash_password
-from app.models import User, UserRole
-from app.schemas.auth import UserCreate, UserOut, UserUpdate
+from app.core.supabase import SupabaseAdmin, get_supabase_admin
+from app.models import Profile, UserRole
 from app.schemas.common import Page
+from app.schemas.profile import ProfileOut, ProfileUpdate, UserCreate
 
 router = APIRouter(
     prefix="/users", tags=["users"], dependencies=[require_roles(UserRole.ADMIN)]
 )
 
+AdminClient = Annotated[SupabaseAdmin, Depends(get_supabase_admin)]
 
-@router.get("", response_model=Page[UserOut])
+
+@router.get("", response_model=Page[ProfileOut])
 async def list_users(db: DbSession, q: str = "", page: int = 1, size: int = 20):
-    stmt = select(User).order_by(User.created_at.desc())
+    stmt = select(Profile).order_by(Profile.created_at.desc())
     if q:
         like = f"%{q}%"
-        stmt = stmt.where(User.email.ilike(like) | User.full_name.ilike(like))
+        stmt = stmt.where(or_(Profile.email.ilike(like), Profile.full_name.ilike(like)))
     return await paginate(db, stmt, page, size)
 
 
-@router.post("", response_model=UserOut, status_code=status.HTTP_201_CREATED)
-async def create_user(data: UserCreate, db: DbSession):
-    exists = await db.scalar(select(User).where(User.email == data.email))
+@router.post("", response_model=ProfileOut, status_code=status.HTTP_201_CREATED)
+async def create_user(data: UserCreate, db: DbSession, admin: AdminClient):
+    exists = await db.scalar(select(Profile).where(Profile.email == data.email))
     if exists is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Já existe um usuário com esse email")
-    user = User(
+    user_id = await admin.create_user(data.email, data.password)
+    profile = Profile(
+        id=uuid.UUID(user_id),
         email=data.email,
         full_name=data.full_name,
-        hashed_password=hash_password(data.password),
         role=data.role,
     )
-    db.add(user)
+    db.add(profile)
     await db.commit()
-    await db.refresh(user)
-    return user
+    await db.refresh(profile)
+    return profile
 
 
-@router.patch("/{user_id}", response_model=UserOut)
-async def update_user(user_id: uuid.UUID, data: UserUpdate, db: DbSession):
-    user = await db.get(User, user_id)
-    if user is None:
+@router.patch("/{user_id}", response_model=ProfileOut)
+async def update_user(user_id: uuid.UUID, data: ProfileUpdate, db: DbSession):
+    profile = await db.get(Profile, user_id)
+    if profile is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Usuário não encontrado")
-    fields = data.model_dump(exclude_unset=True)
-    if "password" in fields:
-        password = fields.pop("password")
-        if password:
-            user.hashed_password = hash_password(password)
-    for field, value in fields.items():
-        setattr(user, field, value)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(profile, field, value)
     await db.commit()
-    await db.refresh(user)
-    return user
+    await db.refresh(profile)
+    return profile
 ```
 
 - [ ] **Step 4: Register the router** — update `backend/app/api/router.py`
@@ -1290,7 +1183,7 @@ api_router.include_router(auth.router)
 api_router.include_router(users.router)
 ```
 
-- [ ] **Step 5: Run tests to verify they pass**
+- [ ] **Step 5: Run the whole suite**
 
 Run: `cd backend && .venv/Scripts/python -m pytest -v`
 Expected: all tests pass (security + auth + users).
@@ -1299,75 +1192,66 @@ Expected: all tests pass (security + auth + users).
 
 ```bash
 git add backend/app/api/users.py backend/app/api/router.py backend/tests/test_users.py
-git commit -m "feat(backend): admin user management endpoints"
+git commit -m "feat(backend): admin user management (list/patch + create via supabase admin api)"
 ```
 
 ---
 
-### Task 6: Seed script + Alembic migration
+### Task 6: set_admin script + Alembic baseline migration
 
 **Files:**
-- Create: `backend/scripts/seed.py`, `backend/scripts/__init__.py`
+- Create: `backend/scripts/__init__.py`, `backend/scripts/set_admin.py`
 - Create: `backend/alembic.ini`, `backend/alembic/env.py`, `backend/alembic/script.py.mako`
 - Create: first migration under `backend/alembic/versions/`
 
 **Interfaces:**
-- Consumes: `settings`, `engine` (Task 1); `Base`, `User`, `UserRole` (Task 3); `hash_password` (Task 2); `run` (Task 1 aio).
-- Produces: `seed.py` creating an admin; a baseline Alembic migration creating `users` + `refresh_tokens`.
+- Consumes: `settings`, `engine`, `session_factory` (Task 1); `Base`, `Profile`, `UserRole` (Task 3); `run` (Task 1).
+- Produces: `set_admin.py` (promote a profile to admin by email); a baseline Alembic migration creating `profiles`.
 
 - [ ] **Step 1: Create `backend/scripts/__init__.py`** (empty file)
 
-- [ ] **Step 2: Create `backend/scripts/seed.py`**
+- [ ] **Step 2: Create `backend/scripts/set_admin.py`**
 
 ```python
-"""Popula a base com um admin inicial. Idempotente por email.
+"""Promove um perfil existente a admin (por email).
 
-Uso: cd backend && .venv/Scripts/python -m scripts.seed
-Credenciais: admin@gruposb.com / admin123 (troque em produção).
+O bootstrap automático já torna o 1º usuário logado admin; use isto para promover
+outra pessoa. O perfil precisa existir (criado no 1º login via Supabase).
+
+Uso: cd backend && .venv/Scripts/python -m scripts.set_admin email@dominio.com
 """
+
+import sys
 
 from sqlalchemy import select
 
 from app.core.aio import run
 from app.core.database import engine, session_factory
-from app.core.security import hash_password
-from app.models import Base, User, UserRole
-
-ADMIN_EMAIL = "admin@gruposb.com"
-ADMIN_PASSWORD = "admin123"
+from app.models import Base, Profile, UserRole
 
 
-async def _seed() -> None:
+async def _set_admin(email: str) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with session_factory() as db:
-        exists = await db.scalar(select(User).where(User.email == ADMIN_EMAIL))
-        if exists is not None:
-            print(f"Admin {ADMIN_EMAIL} já existe — nada a fazer.")
+        profile = await db.scalar(select(Profile).where(Profile.email == email))
+        if profile is None:
+            print(f"Nenhum perfil com email {email}. Faça login uma vez para provisioná-lo.")
             return
-        db.add(
-            User(
-                email=ADMIN_EMAIL,
-                full_name="Administrador",
-                hashed_password=hash_password(ADMIN_PASSWORD),
-                role=UserRole.ADMIN,
-            )
-        )
+        profile.role = UserRole.ADMIN
         await db.commit()
-        print(f"Admin criado: {ADMIN_EMAIL} / {ADMIN_PASSWORD}")
+        print(f"{email} agora é admin.")
     await engine.dispose()
 
 
 if __name__ == "__main__":
-    run(_seed())
+    if len(sys.argv) != 2:
+        print("Uso: python -m scripts.set_admin <email>")
+        raise SystemExit(1)
+    run(_set_admin(sys.argv[1]))
 ```
 
-- [ ] **Step 3: Run the seed against SQLite**
-
-Run: `cd backend && .venv/Scripts/python -m scripts.seed`
-Expected: prints `Admin criado: admin@gruposb.com / admin123`. Running again prints `já existe`.
-
-- [ ] **Step 4: Create `backend/alembic.ini`**
+- [ ] **Step 3: Create `backend/alembic.ini`**
 
 ```ini
 [alembic]
@@ -1410,7 +1294,7 @@ format = %(levelname)-5.5s [%(name)s] %(message)s
 datefmt = %H:%M:%S
 ```
 
-- [ ] **Step 5: Create `backend/alembic/script.py.mako`**
+- [ ] **Step 4: Create `backend/alembic/script.py.mako`**
 
 ```mako
 """${message}
@@ -1439,7 +1323,7 @@ def downgrade() -> None:
     ${downgrades if downgrades else "pass"}
 ```
 
-- [ ] **Step 6: Create `backend/alembic/env.py`** (offline+online, sync driver derived from settings)
+- [ ] **Step 5: Create `backend/alembic/env.py`**
 
 ```python
 import asyncio
@@ -1498,42 +1382,42 @@ else:
     asyncio.run(run_migrations_online())
 ```
 
-- [ ] **Step 7: Autogenerate the baseline migration against a scratch SQLite DB**
+- [ ] **Step 6: Autogenerate the baseline migration against a scratch SQLite DB**
 
 Run (bash):
 ```bash
-cd backend && DATABASE_URL="sqlite+aiosqlite:///./_scratch.db" .venv/Scripts/python -m alembic revision --autogenerate -m "baseline: users and refresh_tokens"
+cd backend && DATABASE_URL="sqlite+aiosqlite:///./_scratch.db" .venv/Scripts/python -m alembic revision --autogenerate -m "baseline: profiles"
+rm -f backend/_scratch.db
 ```
-Then delete the scratch DB: `rm -f backend/_scratch.db`.
-Expected: a new file in `backend/alembic/versions/` whose `upgrade()` creates `users` and `refresh_tokens`.
+Expected: a new file in `backend/alembic/versions/` whose `upgrade()` creates the `profiles` table.
 
-- [ ] **Step 8: Verify the migration applies cleanly**
+- [ ] **Step 7: Verify the migration applies cleanly**
 
 Run (bash):
 ```bash
 cd backend && DATABASE_URL="sqlite+aiosqlite:///./_verify.db" .venv/Scripts/python -m alembic upgrade head && rm -f backend/_verify.db
 ```
-Expected: `Running upgrade -> <rev>, baseline: users and refresh_tokens`, no errors.
+Expected: `Running upgrade -> <rev>, baseline: profiles`, no errors.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add backend/scripts backend/alembic.ini backend/alembic
-git commit -m "feat(backend): seed admin script and baseline alembic migration"
+git commit -m "feat(backend): set_admin utility and baseline alembic migration (profiles)"
 ```
 
 ---
 
-### Task 7: Frontend skeleton — Vite, Tailwind theme, api client, auth context
+### Task 7: Frontend skeleton — Vite, Tailwind theme, Supabase client, api client, auth context
 
 **Files:**
-- Create: `frontend/package.json`, `frontend/tsconfig.json`, `frontend/tsconfig.node.json`, `frontend/vite.config.ts`, `frontend/index.html`
+- Create: `frontend/package.json`, `frontend/tsconfig.json`, `frontend/tsconfig.node.json`, `frontend/vite.config.ts`, `frontend/index.html`, `frontend/.env.example`
 - Create: `frontend/src/main.tsx`, `frontend/src/index.css`, `frontend/src/vite-env.d.ts`, `frontend/src/types.ts`
-- Create: `frontend/src/lib/api.ts`, `frontend/src/lib/utils.ts`, `frontend/src/context/auth.tsx`
+- Create: `frontend/src/lib/supabase.ts`, `frontend/src/lib/api.ts`, `frontend/src/lib/utils.ts`, `frontend/src/context/auth.tsx`
 
 **Interfaces:**
-- Produces: `api<T>(path, options)`, `setTokens/clearTokens/getAccessToken/getRefreshToken`, `ApiError` (`lib/api.ts`); `cn(...)` (`lib/utils.ts`); `AuthProvider`, `useAuth` (`context/auth.tsx`); types `TokenPair`, `User`, `UserRole`, `Page<T>` (`types.ts`).
-- Consumes: backend `/api/v1/auth/*` (Task 4).
+- Produces: `supabase` client (`lib/supabase.ts`); `api<T>(path, options)`, `ApiError` (`lib/api.ts`); `cn(...)` (`lib/utils.ts`); `AuthProvider`, `useAuth` (`context/auth.tsx`); types `Profile`, `UserRole`, `Page<T>` (`types.ts`).
+- Consumes: backend `/api/v1/auth/me` (Task 4); Supabase Auth (external).
 
 - [ ] **Step 1: Create `frontend/package.json`**
 
@@ -1551,6 +1435,7 @@ git commit -m "feat(backend): seed admin script and baseline alembic migration"
   "dependencies": {
     "@radix-ui/react-label": "^2.1.1",
     "@radix-ui/react-slot": "^1.1.1",
+    "@supabase/supabase-js": "^2.47.10",
     "@tanstack/react-query": "^5.62.7",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
@@ -1663,7 +1548,17 @@ export default defineConfig({
 </html>
 ```
 
-- [ ] **Step 5: Create `frontend/src/index.css`** (theme tokens, black/gray/yellow)
+- [ ] **Step 5: Create `frontend/.env.example`**
+
+```dotenv
+# Copie para .env.local. Só a ANON key vai para o front (nunca a service role key).
+VITE_SUPABASE_URL=https://SEU-REF.supabase.co
+VITE_SUPABASE_ANON_KEY=SUA-ANON-KEY
+# Alvo do proxy /api em dev (default http://127.0.0.1:8000)
+# VITE_PROXY_TARGET=http://127.0.0.1:8000
+```
+
+- [ ] **Step 6: Create `frontend/src/index.css`** (theme tokens, black/gray/yellow)
 
 ```css
 @import "tailwindcss";
@@ -1743,25 +1638,18 @@ export default defineConfig({
 }
 ```
 
-- [ ] **Step 6: Create `frontend/src/vite-env.d.ts`**
+- [ ] **Step 7: Create `frontend/src/vite-env.d.ts`**
 
 ```typescript
 /// <reference types="vite/client" />
 ```
 
-- [ ] **Step 7: Create `frontend/src/types.ts`**
+- [ ] **Step 8: Create `frontend/src/types.ts`**
 
 ```typescript
 export type UserRole = "admin" | "operador";
 
-export interface TokenPair {
-  access_token: string;
-  refresh_token: string;
-  token_type: string;
-  expires_in: number;
-}
-
-export interface User {
+export interface Profile {
   id: string;
   email: string;
   full_name: string;
@@ -1778,7 +1666,7 @@ export interface Page<T> {
 }
 ```
 
-- [ ] **Step 8: Create `frontend/src/lib/utils.ts`**
+- [ ] **Step 9: Create `frontend/src/lib/utils.ts`**
 
 ```typescript
 import { clsx, type ClassValue } from "clsx";
@@ -1789,14 +1677,30 @@ export function cn(...inputs: ClassValue[]): string {
 }
 ```
 
-- [ ] **Step 9: Create `frontend/src/lib/api.ts`**
+- [ ] **Step 10: Create `frontend/src/lib/supabase.ts`**
 
 ```typescript
-import type { TokenPair } from "@/types";
+import { createClient } from "@supabase/supabase-js";
+
+const url = import.meta.env.VITE_SUPABASE_URL as string;
+const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+
+if (!url || !anonKey) {
+  // Falha cedo e clara: sem essas envs o login não funciona.
+  console.error("VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY ausentes — configure .env.local");
+}
+
+export const supabase = createClient(url, anonKey, {
+  auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
+});
+```
+
+- [ ] **Step 11: Create `frontend/src/lib/api.ts`**
+
+```typescript
+import { supabase } from "@/lib/supabase";
 
 const BASE = "/api/v1";
-const ACCESS_KEY = "gsb_estoque_access";
-const REFRESH_KEY = "gsb_estoque_refresh";
 
 export class ApiError extends Error {
   status: number;
@@ -1806,81 +1710,36 @@ export class ApiError extends Error {
   }
 }
 
-export function getAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_KEY);
-}
-export function getRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_KEY);
-}
-export function setTokens(tokens: TokenPair): void {
-  localStorage.setItem(ACCESS_KEY, tokens.access_token);
-  localStorage.setItem(REFRESH_KEY, tokens.refresh_token);
-}
-export function clearTokens(): void {
-  localStorage.removeItem(ACCESS_KEY);
-  localStorage.removeItem(REFRESH_KEY);
-}
-
-// Single-flight: múltiplos 401 simultâneos disparam um único refresh.
-let refreshPromise: Promise<boolean> | null = null;
-
-async function tryRefresh(): Promise<boolean> {
-  refreshPromise ??= (async () => {
-    const refreshToken = localStorage.getItem(REFRESH_KEY);
-    if (!refreshToken) return false;
-    try {
-      const resp = await fetch(`${BASE}/auth/refresh`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: refreshToken }),
-      });
-      if (!resp.ok) return false;
-      setTokens((await resp.json()) as TokenPair);
-      return true;
-    } catch {
-      return false;
-    } finally {
-      setTimeout(() => {
-        refreshPromise = null;
-      }, 0);
-    }
-  })();
-  return refreshPromise;
-}
-
 interface RequestOptions {
   method?: string;
   json?: unknown;
   params?: Record<string, string | number | boolean | undefined>;
 }
 
-async function rawRequest(path: string, options: RequestOptions): Promise<Response> {
+export async function api<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
   const url = new URL(BASE + path, window.location.origin);
   for (const [key, value] of Object.entries(options.params ?? {})) {
     if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
   }
+
+  // O supabase-js renova o access token automaticamente; pegamos o atual da sessão.
+  const { data } = await supabase.auth.getSession();
   const headers: Record<string, string> = {};
-  const token = getAccessToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
+  if (data.session?.access_token) headers.Authorization = `Bearer ${data.session.access_token}`;
   if (options.json !== undefined) headers["Content-Type"] = "application/json";
-  return fetch(url, {
+
+  const resp = await fetch(url, {
     method: options.method ?? "GET",
     headers,
     body: options.json !== undefined ? JSON.stringify(options.json) : undefined,
   });
-}
 
-export async function api<T = unknown>(path: string, options: RequestOptions = {}): Promise<T> {
-  let resp = await rawRequest(path, options);
-  if (resp.status === 401 && !path.startsWith("/auth/")) {
-    if (await tryRefresh()) {
-      resp = await rawRequest(path, options);
-    } else {
-      clearTokens();
-      window.location.assign("/login");
-      throw new ApiError(401, "Sessão expirada");
-    }
+  if (resp.status === 401) {
+    await supabase.auth.signOut();
+    window.location.assign("/login");
+    throw new ApiError(401, "Sessão expirada");
   }
+
   if (!resp.ok) {
     let detail = `Erro ${resp.status}`;
     try {
@@ -1894,69 +1753,72 @@ export async function api<T = unknown>(path: string, options: RequestOptions = {
     }
     throw new ApiError(resp.status, detail);
   }
+
   if (resp.status === 204) return undefined as T;
   return (await resp.json()) as T;
 }
 ```
 
-- [ ] **Step 10: Create `frontend/src/context/auth.tsx`**
+- [ ] **Step 12: Create `frontend/src/context/auth.tsx`**
 
 ```typescript
-import { api, clearTokens, getAccessToken, getRefreshToken, setTokens } from "@/lib/api";
-import type { TokenPair, User } from "@/types";
+import { api } from "@/lib/api";
+import { supabase } from "@/lib/supabase";
+import type { Profile } from "@/types";
+import type { Session } from "@supabase/supabase-js";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 
 interface AuthContextValue {
-  user: User | undefined;
-  isLoading: boolean;
+  profile: Profile | undefined;
+  isReady: boolean;
   isAuthenticated: boolean;
   login: (email: string, password: string) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
-  const [hasToken, setHasToken] = useState(() => Boolean(getAccessToken()));
+  const [session, setSession] = useState<Session | null>(null);
+  const [isReady, setIsReady] = useState(false);
 
-  const { data: user, isLoading } = useQuery({
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setIsReady(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(next);
+      void queryClient.invalidateQueries({ queryKey: ["me"] });
+    });
+    return () => sub.subscription.unsubscribe();
+  }, [queryClient]);
+
+  const { data: profile } = useQuery({
     queryKey: ["me"],
-    queryFn: () => api<User>("/auth/me"),
-    enabled: hasToken,
+    queryFn: () => api<Profile>("/auth/me"),
+    enabled: Boolean(session),
     staleTime: 5 * 60 * 1000,
     retry: false,
   });
 
-  const login = useCallback(
-    async (email: string, password: string) => {
-      const tokens = await api<TokenPair>("/auth/login", {
-        method: "POST",
-        json: { email, password },
-      });
-      setTokens(tokens);
-      setHasToken(true);
-      await queryClient.invalidateQueries({ queryKey: ["me"] });
-    },
-    [queryClient],
-  );
+  async function login(email: string, password: string) {
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error) throw new Error(error.message);
+  }
 
-  const logout = useCallback(() => {
-    const refreshToken = getRefreshToken();
-    if (refreshToken) {
-      void api("/auth/logout", { method: "POST", json: { refresh_token: refreshToken } }).catch(
-        () => undefined,
-      );
-    }
-    clearTokens();
-    setHasToken(false);
+  async function logout() {
+    await supabase.auth.signOut();
     queryClient.clear();
     window.location.assign("/login");
-  }, [queryClient]);
+  }
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, isAuthenticated: hasToken, login, logout }}>
+    <AuthContext.Provider
+      value={{ profile, isReady, isAuthenticated: Boolean(session), login, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );
@@ -1969,9 +1831,10 @@ export function useAuth(): AuthContextValue {
 }
 ```
 
-- [ ] **Step 11: Create `frontend/src/main.tsx`** (wires providers; App comes in Task 8)
+- [ ] **Step 13: Create `frontend/src/main.tsx`**
 
 ```typescript
+import App from "@/App";
 import { AuthProvider } from "@/context/auth";
 import "@/index.css";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -1979,7 +1842,6 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { Toaster } from "sonner";
-import App from "@/App";
 
 const queryClient = new QueryClient();
 
@@ -1997,21 +1859,21 @@ createRoot(document.getElementById("root")!).render(
 );
 ```
 
-- [ ] **Step 12: Install deps**
+- [ ] **Step 14: Install deps**
 
 Run: `cd frontend && npm install`
-Expected: dependencies install without errors (`node_modules/` created).
+Expected: dependencies install without errors.
 
-- [ ] **Step 13: Commit**
+- [ ] **Step 15: Commit**
 
 ```bash
-git add frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html frontend/src
-git commit -m "feat(frontend): vite/tailwind skeleton with theme, api client and auth context"
+git add frontend/package.json frontend/package-lock.json frontend/tsconfig.json frontend/tsconfig.node.json frontend/vite.config.ts frontend/index.html frontend/.env.example frontend/src
+git commit -m "feat(frontend): vite/tailwind skeleton with supabase client, api client and auth context"
 ```
 
 ---
 
-### Task 8: UI primitives, login page, protected shell, routing
+### Task 8: UI primitives, login (Supabase), protected shell, routing
 
 **Files:**
 - Create: `frontend/src/components/ui/button.tsx`, `frontend/src/components/ui/input.tsx`, `frontend/src/components/ui/card.tsx`, `frontend/src/components/ui/label.tsx`
@@ -2020,8 +1882,8 @@ git commit -m "feat(frontend): vite/tailwind skeleton with theme, api client and
 - Create: `frontend/src/App.tsx`
 
 **Interfaces:**
-- Consumes: `useAuth` (Task 7), `cn` (Task 7), `api`/`ApiError` (Task 7).
-- Produces: `<App/>` route tree with `/login` (public) and protected `/` (shell + dashboard placeholder).
+- Consumes: `useAuth` (Task 7), `cn` (Task 7), `ApiError` (Task 7).
+- Produces: `<App/>` route tree with `/login` (public, Supabase sign-in) and protected `/` (shell + dashboard placeholder).
 
 - [ ] **Step 1: Create `frontend/src/components/ui/button.tsx`**
 
@@ -2041,12 +1903,7 @@ const buttonVariants = cva(
         ghost: "hover:bg-accent hover:text-accent-foreground",
         destructive: "bg-destructive text-destructive-foreground hover:bg-destructive/90",
       },
-      size: {
-        default: "h-10 px-4 py-2",
-        sm: "h-9 px-3",
-        lg: "h-11 px-6",
-        icon: "h-10 w-10",
-      },
+      size: { default: "h-10 px-4 py-2", sm: "h-9 px-3", lg: "h-11 px-6", icon: "h-10 w-10" },
     },
     defaultVariants: { variant: "default", size: "default" },
   },
@@ -2147,7 +2004,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/context/auth";
-import { ApiError } from "@/lib/api";
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router";
 import { toast } from "sonner";
@@ -2166,7 +2022,7 @@ export default function LoginPage() {
       await login(email, password);
       navigate("/", { replace: true });
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : "Falha ao entrar");
+      toast.error(err instanceof Error ? err.message : "Falha ao entrar");
     } finally {
       setLoading(false);
     }
@@ -2228,7 +2084,7 @@ const NAV = [
 ];
 
 export default function AppShell() {
-  const { user, logout } = useAuth();
+  const { profile, logout } = useAuth();
   return (
     <div className="flex min-h-screen">
       <aside className="hidden w-60 flex-col border-r border-border bg-card p-4 md:flex">
@@ -2255,8 +2111,8 @@ export default function AppShell() {
           ))}
         </nav>
         <div className="mt-auto flex items-center justify-between px-2 pt-4">
-          <span className="truncate text-xs text-muted-foreground">{user?.email}</span>
-          <Button variant="ghost" size="icon" onClick={logout} title="Sair">
+          <span className="truncate text-xs text-muted-foreground">{profile?.email}</span>
+          <Button variant="ghost" size="icon" onClick={() => void logout()} title="Sair">
             <LogOut className="h-4 w-4" />
           </Button>
         </div>
@@ -2276,13 +2132,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/context/auth";
 
 export default function DashboardPage() {
-  const { user } = useAuth();
+  const { profile } = useAuth();
   return (
     <div className="flex flex-col gap-6">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
         <p className="text-sm text-muted-foreground">
-          Bem-vindo, {user?.full_name || user?.email}.
+          Bem-vindo, {profile?.full_name || profile?.email}.
         </p>
       </div>
       <Card>
@@ -2290,8 +2146,8 @@ export default function DashboardPage() {
           <CardTitle>Fundação pronta</CardTitle>
         </CardHeader>
         <CardContent className="text-sm text-muted-foreground">
-          Login e estrutura no ar. Os módulos de peças, máquinas e relatórios entram nas
-          próximas fases.
+          Login (Supabase) e estrutura no ar. Os módulos de peças, máquinas e relatórios entram
+          nas próximas fases.
         </CardContent>
       </Card>
     </div>
@@ -2299,7 +2155,7 @@ export default function DashboardPage() {
 }
 ```
 
-- [ ] **Step 8: Create `frontend/src/App.tsx`** (routing + guards)
+- [ ] **Step 8: Create `frontend/src/App.tsx`**
 
 ```typescript
 import AppShell from "@/components/layout/app-shell";
@@ -2310,8 +2166,8 @@ import type { ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router";
 
 function Protected({ children }: { children: ReactNode }) {
-  const { isAuthenticated, isLoading } = useAuth();
-  if (isLoading) return <div className="p-6 text-muted-foreground">Carregando...</div>;
+  const { isAuthenticated, isReady } = useAuth();
+  if (!isReady) return <div className="p-6 text-muted-foreground">Carregando...</div>;
   if (!isAuthenticated) return <Navigate to="/login" replace />;
   return <>{children}</>;
 }
@@ -2342,15 +2198,17 @@ Expected: `tsc -b` passes with no errors and Vite produces `dist/`.
 
 - [ ] **Step 10: Manual smoke test (login end-to-end)**
 
-Start the backend seeded (from Task 6): `cd backend && .venv/Scripts/python -m scripts.seed` then `cd backend && .venv/Scripts/python run.py`.
-In another terminal: `cd frontend && npm run dev`. Open `http://localhost:5173`, log in with `admin@gruposb.com` / `admin123`.
-Expected: redirect to the dashboard showing the admin email; reload keeps the session; the Sair button returns to `/login`.
+Prereqs: a Supabase project; set `frontend/.env.local` (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) and `backend/.env` (`SUPABASE_URL`, `SUPABASE_JWT_SECRET`, and for creating users `SUPABASE_SERVICE_ROLE_KEY`). Create one user in the Supabase dashboard (Authentication → Users → Add user), confirmed.
+Start backend: `cd backend && .venv/Scripts/python run.py`. Start frontend: `cd frontend && npm run dev`. Open `http://localhost:5173`, log in with that user.
+Expected: redirect to the dashboard showing the user email; `/auth/me` returns role `admin` for the first login; the Sair button returns to `/login`.
+
+> If you don't have a Supabase project yet, this manual step is deferred; the automated backend tests already cover auth/roles without Supabase.
 
 - [ ] **Step 11: Commit**
 
 ```bash
 git add frontend/src/components frontend/src/pages frontend/src/App.tsx
-git commit -m "feat(frontend): ui primitives, login page and protected app shell"
+git commit -m "feat(frontend): ui primitives, supabase login and protected app shell"
 ```
 
 ---
@@ -2362,47 +2220,31 @@ git commit -m "feat(frontend): ui primitives, login page and protected app shell
 - Create: `README.md`, `CLAUDE.md`, `HANDOFF.md`
 
 **Interfaces:**
-- Consumes: backend (`run.py`, `.env`), frontend (`npm run build`, `frontend/dist`).
-- Produces: LAN single-origin serving and dev infra; onboarding docs.
+- Consumes: backend (`run.py`, `.env`), frontend (`npm run build`, `frontend/dist`), Supabase (external DB + Auth).
+- Produces: LAN single-origin serving and dev convenience; onboarding docs.
 
 - [ ] **Step 1: Create `docker-compose.yml`**
 
 ```yaml
 name: gruposb-estoque
 
+# O banco e a autenticação são o Supabase (externos). Este compose sobe apenas a
+# API e o frontend; as credenciais do Supabase vêm de um .env na raiz.
 services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: estoque
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-estoque}
-      POSTGRES_DB: estoque
-    ports:
-      # 5433 no host: a máquina de dev tem PostgreSQL nativo em 5432.
-      - "5433:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U estoque -d estoque"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
   api:
     build: ./backend
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
-      DATABASE_URL: postgresql+psycopg://estoque:${POSTGRES_PASSWORD:-estoque}@db:5432/estoque
+      DATABASE_URL: ${DATABASE_URL}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
       AUTO_CREATE_TABLES: "false"
-      SECRET_KEY: ${SECRET_KEY:-dev-secret-troque-em-producao-0000000000}
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
     ports:
       - "8000:8000"
     volumes:
       - ./backend:/app
-    depends_on:
-      db:
-        condition: service_healthy
 
   frontend:
     image: node:24-alpine
@@ -2410,24 +2252,23 @@ services:
     command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
     environment:
       VITE_PROXY_TARGET: http://api:8000
+      VITE_SUPABASE_URL: ${SUPABASE_URL}
+      VITE_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
     ports:
       - "5173:5173"
     volumes:
       - ./frontend:/app
     depends_on:
       - api
-
-volumes:
-  pgdata:
 ```
 
-> Note: `build: ./backend` expects a `backend/Dockerfile`. Add one when containerizing the API; for local dev the compose `db` service is enough (run the API with `python run.py`). Creating the Dockerfile is deferred to the deploy phase.
+> Note: `build: ./backend` expects a `backend/Dockerfile` — add one when containerizing (deferred to the deploy phase). For local dev, run the API with `python run.py` and the front with `npm run dev`; Docker is optional since the DB/Auth are Supabase.
 
 - [ ] **Step 2: Create `serve-lan.ps1`**
 
 ```powershell
 # Builda o frontend e sobe a API servindo a SPA (origem única) na rede local.
-# Uso: .\serve-lan.ps1
+# Banco e auth ficam no Supabase (backend/.env). Uso: .\serve-lan.ps1
 $ErrorActionPreference = "Stop"
 
 Push-Location frontend
@@ -2438,13 +2279,15 @@ Pop-Location
 Push-Location backend
 $env:FRONTEND_DIST = "../frontend/dist"
 $env:API_HOST = "0.0.0.0"
-Write-Host "Servindo em http://<ip-da-maquina>:8000 (origem única)"
+Write-Host "Servindo em http://<ip-da-maquina>:8000 (origem única; DB/Auth = Supabase)"
 .\.venv\Scripts\python run.py
 Pop-Location
 ```
 
 > Antes de expor na rede (PowerShell como admin, uma vez):
 > `New-NetFirewallRule -DisplayName "GrupoSB Estoque" -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow -Profile Private`
+>
+> O front buildado precisa das envs `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` em `frontend/.env.local` no momento do build.
 
 - [ ] **Step 3: Create `README.md`**
 
@@ -2452,11 +2295,18 @@ Pop-Location
 # GrupoSB Estoque
 
 Gerenciador de estoque (peças + máquinas) do Grupo SB. Migração do sistema em Google Apps
-Script para uma aplicação web independente, espelhando a arquitetura do `gsb-crm`.
+Script para uma aplicação web independente. Backend FastAPI usando **Supabase** como Postgres
+gerenciado e provedor de autenticação (Supabase Auth).
 
-**Stack:** FastAPI + SQLAlchemy async (Python) · React 19 + TS + Vite + Tailwind 4 · PostgreSQL 16 (ou SQLite em dev).
+**Stack:** FastAPI + SQLAlchemy async (Python) · React 19 + TS + Vite + Tailwind 4 · Supabase
+(Postgres + Auth). SQLite como fallback de dev.
 
-## Rodar em dev (SQLite, zero infra)
+## Pré-requisitos
+
+- Um projeto **Supabase** (grátis). Anote em Project Settings → API: `Project URL`,
+  `anon key`, `service_role key` e o `JWT secret`.
+
+## Rodar em dev
 
 ```bash
 # Backend
@@ -2464,27 +2314,32 @@ cd backend
 python -m venv .venv
 .venv/Scripts/activate            # Windows
 pip install -e ".[dev]"
-python -m scripts.seed            # admin@gruposb.com / admin123
+copy .env.example .env            # preencha SUPABASE_URL / SUPABASE_JWT_SECRET / SERVICE_ROLE_KEY
 python run.py                     # http://127.0.0.1:8000 (docs: /api/v1/docs)
 
 # Frontend (outro terminal)
 cd frontend
 npm install
+copy .env.example .env.local      # preencha VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
 npm run dev                       # http://localhost:5173
 ```
+
+O **primeiro usuário que logar** vira `admin` automaticamente. Crie usuários no painel do
+Supabase (Authentication → Users) ou, como admin, via `POST /api/v1/users`. Para promover
+alguém a admin manualmente: `python -m scripts.set_admin email@dominio.com`.
 
 ## Testes
 
 ```bash
-cd backend && .venv/Scripts/python -m pytest
-cd frontend && npm run build      # type-check + build
+cd backend && .venv/Scripts/python -m pytest    # não exige Supabase (JWT de teste local)
+cd frontend && npm run build                    # type-check + build
 ```
 
 ## Rede local (origem única)
 
 `.\serve-lan.ps1` builda o front e sobe a API servindo a SPA em `http://<ip>:8000`.
 
-Consulte `docs/superpowers/specs/` para o design e `docs/superpowers/plans/` para os planos por fase.
+Consulte `docs/superpowers/specs/` (design) e `docs/superpowers/plans/` (planos por fase).
 ```
 
 - [ ] **Step 4: Create `CLAUDE.md`**
@@ -2496,10 +2351,10 @@ Gerenciador de estoque do Grupo SB (peças + máquinas), migrado do Google Apps 
 Dono: Arthur (gruposb.dev@gmail.com). Idioma do produto: pt-BR. Commits: inglês, conventional.
 
 ## Stack
-- Backend `backend/`: FastAPI, SQLAlchemy 2 async, Alembic, Pydantic v2, PyJWT (access 15min +
-  refresh 7d rotacionado), pwdlib/Argon2id. Postgres 16 (compose, porta 5433) ou SQLite fallback.
+- Backend `backend/`: FastAPI, SQLAlchemy 2 async, Alembic, Pydantic v2, PyJWT. Banco e auth no
+  **Supabase** (Postgres gerenciado + Supabase Auth). SQLite fallback em dev/testes.
 - Frontend `frontend/`: React 19, TS estrito, Vite 6, Tailwind 4 (tokens em `src/index.css`),
-  UI shadcn-style à mão em `components/ui/`, TanStack Query 5, react-router 7.
+  UI shadcn-style à mão em `components/ui/`, TanStack Query 5, react-router 7, @supabase/supabase-js.
 - Tema escuro único preto/cinza + amarelo `oklch(0.83 0.16 90)`; verde/vermelho só semânticos.
 
 ## Domínio (preservar do sistema antigo)
@@ -2508,30 +2363,37 @@ Dono: Arthur (gruposb.dev@gmail.com). Idioma do produto: pt-BR. Commits: inglês
 - Dois módulos: peças (`items` + ledger) e máquinas (`machine_models` → `machine_units`).
 - Papéis: `admin` | `operador`.
 
+## Auth (Supabase)
+- Login/sessão/refresh no **Supabase Auth** (front usa `@supabase/supabase-js`). O FastAPI só
+  **valida o JWT** (HS256 com `SUPABASE_JWT_SECRET`, `aud=authenticated`) e resolve o `profiles`.
+- 1º usuário logado vira `admin` (bootstrap); demais `operador`. Admin cria usuários via Admin API
+  (`SUPABASE_SERVICE_ROLE_KEY`, só no backend). Promover manualmente: `scripts.set_admin`.
+
 ## Convenções e armadilhas
-- Modelos herdam `TableBase` (UUID pk + created/updated). Enums: StrEnum + `native_enum=False`.
-- Windows: psycopg async exige SelectorEventLoop → `app/core/aio.py` + `python run.py`
-  (não `uvicorn app.main:app` com Postgres). Hot-reload só no modo SQLite.
+- Modelos herdam `TableBase` (UUID pk + created/updated). **`profiles.id` é o uuid do Supabase**
+  (sem gerador default). Enums: StrEnum + `native_enum=False`.
+- Banco em produção: **session pooler do Supabase (5432)** — servidor persistente, prepared
+  statements OK. Modo transação (6543) é para serverless — evitado.
+- Windows: psycopg async exige SelectorEventLoop → `app/core/aio.py` + `python run.py`.
 - Migrações autogeradas contra SQLite scratch; revisar `server_default` em colunas NOT NULL novas.
-- Datas: schemas Out usam `UTCDateTime` (`schemas/common.py`) — SQLite devolve naive.
-- Origem única: `FRONTEND_DIST` faz a API servir a SPA (sem CORS). `serve-lan.ps1` na raiz.
-- Frontend: paginação `Page<T>`; `lib/api.ts` faz refresh single-flight e redirect p/ /login em 401.
+- Datas: schemas Out usam `UTCDateTime` (`schemas/common.py`).
+- Front: `lib/api.ts` pega o token da sessão do Supabase; 401 → signOut + /login. Paginação `Page<T>`.
 
 ## Receita p/ novo módulo
-model → schemas → router (padrão `users.py`/`auth.py`) → `api/router.py` → migração → teste →
-`types.ts` → página → rota em `App.tsx` → item no `NAV` do `app-shell.tsx`.
+model → schemas → router (padrão `users.py`) → `api/router.py` → migração → teste → `types.ts` →
+página → rota em `App.tsx` → item no `NAV` do `app-shell.tsx`.
 
 ## Comandos
 ```
-backend: python -m scripts.seed        # admin@gruposb.com / admin123
 backend: python run.py                 # API dev
-backend: python -m pytest              # testes
+backend: python -m pytest              # testes (sem Supabase)
+backend: python -m scripts.set_admin <email>
 frontend: npm run dev | npm run build
 ```
 
 ## Estado
-Fundação (scaffold + auth) implementada. Próximas fases: núcleo de peças (ledger), máquinas,
-relatórios/dashboard, ETL da planilha. Ver `docs/superpowers/plans/`.
+Fundação (scaffold + Supabase Auth) implementada. Próximas fases: núcleo de peças (ledger),
+máquinas, relatórios/dashboard, ETL da planilha. Ver `docs/superpowers/plans/`.
 ```
 
 - [ ] **Step 5: Create `HANDOFF.md`**
@@ -2541,24 +2403,26 @@ relatórios/dashboard, ETL da planilha. Ver `docs/superpowers/plans/`.
 
 ## Última sessão
 Fundação implementada a partir do plano `docs/superpowers/plans/2026-08-07-foundation-scaffold-auth.md`:
-- Backend FastAPI: config, async DB (Postgres/SQLite), `TableBase`, security (Argon2+JWT),
-  auth (login/refresh/logout/me/bootstrap) com rate-limit, users CRUD (admin), seed, migração baseline.
-- Frontend React/Vite/Tailwind 4: tema, api client com refresh, auth context, login, app-shell,
-  dashboard placeholder, rotas protegidas.
-- Testes backend passando (security, auth, users). `npm run build` limpo.
+- Backend FastAPI: config (Supabase), async DB (Supabase Postgres/SQLite), `TableBase`,
+  validação do JWT do Supabase, `profiles` com provisionamento + bootstrap do 1º admin,
+  `/auth/me`, users CRUD (admin, criação via Supabase Admin API), `set_admin`, migração baseline.
+- Frontend React/Vite/Tailwind 4: tema, client supabase-js, api client, auth context,
+  login (Supabase), app-shell, dashboard placeholder, rotas protegidas.
+- Testes backend passando (security, auth, users) sem exigir Supabase. `npm run build` limpo.
 
 ## Como validar
-`cd backend && python -m pytest` · `cd frontend && npm run build` · login manual admin/admin123.
+`cd backend && python -m pytest` · `cd frontend && npm run build` · login manual (exige projeto Supabase).
 
 ## Próximos passos (nova fase, novo plano)
 1. **Núcleo de peças**: `Category`, `Item`, `Movement` (ledger), serviço de movimentação com saldo
-   derivado + trava por transação (`SELECT ... FOR UPDATE`), ajuste, histórico. (spec §4–§5)
+   derivado + trava por transação (`SELECT ... FOR UPDATE` no Postgres do Supabase), ajuste, histórico.
 2. **Máquinas**: `MachineModel` + `MachineUnit`.
 3. **Relatórios + alertas + dashboard** (Recharts).
 4. **ETL**: `scripts/import_sheets.py` — importar o export `.xlsx` da planilha e conferir saldos.
 
 ## Pendências conhecidas
 - `backend/Dockerfile` ainda não criado (compose `api` depende dele) — fazer na fase de deploy.
+- JWKS/chaves assimétricas do Supabase: hoje validamos HS256 com o JWT secret; migrar p/ JWKS é opcional.
 - HTTPS não terminado pela API — em rede local usar Cloudflare Tunnel/Tailscale.
 ```
 
@@ -2566,24 +2430,25 @@ Fundação implementada a partir do plano `docs/superpowers/plans/2026-08-07-fou
 
 ```bash
 git add docker-compose.yml serve-lan.ps1 README.md CLAUDE.md HANDOFF.md
-git commit -m "docs: dev infra, single-origin serve script and project docs"
+git commit -m "docs: dev infra, single-origin serve script and project docs (supabase)"
 ```
 
 ---
 
 ## Self-Review
 
-**1. Spec coverage (foundation slice of spec §3, §4-users, §5-auth, §6-frontend, §8, §10 phases 0-1):**
+**1. Spec coverage (foundation slice of spec §3, §4-profiles, §5-auth/users, §6-frontend, §8/§8.1, §10 phases 0-1):**
 - Project structure (spec §3) → Tasks 1, 7, 9. ✓
-- `users`/`refresh_tokens` model + UUID `TableBase` + StrEnum (spec §4) → Task 3. ✓
-- Auth endpoints + roles + rate-limit + refuse-boot guard (spec §5, §8) → Tasks 1 (guard), 4. ✓
-- Users admin CRUD (spec §5) → Task 5. ✓
-- Frontend theme/kit/api client/auth (spec §6) → Tasks 7, 8. ✓
-- Single-origin serve, Windows loop, SQLite fallback (spec §3, §8) → Tasks 1, 9. ✓
-- Tests with in-memory SQLite (spec §9) → Tasks 2, 4, 5. ✓
-- Seed + Alembic baseline (spec §10 phase 0-1) → Task 6. ✓
+- `profiles` model + UUID from Supabase + StrEnum roles (spec §4) → Task 3. ✓
+- Supabase JWT verification + provisioning + first-user bootstrap (spec §5, §8, §8.1) → Tasks 2, 3, 4. ✓
+- `GET /auth/me`, users list/patch, create via Admin API (spec §5, §8.1) → Tasks 4, 5. ✓
+- Frontend theme/kit/supabase client/api client/auth via supabase-js (spec §6) → Tasks 7, 8. ✓
+- Single-origin serve, Windows loop, SQLite fallback, refuse-boot guard (spec §3, §8, §8.1) → Tasks 1, 9. ✓
+- Tests with in-memory SQLite + minted Supabase-format JWTs + mocked Admin client (spec §8.1, §9) → Tasks 2, 4, 5. ✓
+- `set_admin` + Alembic baseline (spec §10 phase 0-1) → Task 6. ✓
 - Domain models (items/movements/machines), reports, ETL → **out of scope for this plan** (spec §10 phases 2-5, each gets its own plan). Noted in HANDOFF.
 
-**2. Placeholder scan:** No "TBD"/"add validation"/"similar to". The dashboard is an intentional placeholder page (labeled), not a plan placeholder. The `backend/Dockerfile` gap is explicitly flagged, not silently assumed.
+**2. Placeholder scan:** No "TBD"/"add validation"/"similar to". The dashboard is an intentional, labeled placeholder page. The `backend/Dockerfile` gap and the JWKS-vs-HS256 choice are explicitly flagged, not silently assumed. The manual smoke test (Task 8 Step 10) is explicitly marked deferrable when no Supabase project exists.
 
-**3. Type consistency:** `create_token_pair` dict keys used identically in Task 2 and Task 4. `UserRole` values `admin`/`operador` consistent across models (Task 3), tests (Tasks 4-5), and frontend `types.ts` (Task 7). `Page[T]` (backend Task 3) mirrors `Page<T>` (frontend Task 7). `api<T>()` signature in Task 7 matches usage in Tasks 7-8. `require_roles`/`get_current_user`/`DbSession` defined in Task 3, consumed in Tasks 4-5.
+**3. Type consistency:** `decode_supabase_jwt` (Task 2) is consumed by `get_current_user` (Task 3) and exercised by minted tokens using the same secret/audience in `helpers.make_token` (Task 4). `UserRole` values `admin`/`operador` consistent across model (Task 3), tests (Tasks 4-5), and frontend `types.ts` (Task 7). `Profile` fields match `ProfileOut` (Task 3) and the frontend `Profile` type (Task 7). `Page[T]` (Task 3) mirrors `Page<T>` (Task 7). `SupabaseAdmin.create_user(email, password) -> str` (Task 3) is called in `users.create_user` (Task 5) and faked with the same signature in tests (Task 5). `require_roles`/`get_current_user`/`DbSession` defined in Task 3, consumed in Tasks 4-5. `useAuth()` shape (`profile`, `isReady`, `isAuthenticated`, `login`, `logout`) defined in Task 7, consumed in Task 8.
+```

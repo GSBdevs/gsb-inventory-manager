@@ -17,7 +17,13 @@ Decisões do dono (2026-08-07):
   PWA/Tauri adiada para depois — sem retrabalho de backend.
 - **Dados:** migrar **tudo** via ETL (itens, ledger de movimentações, técnicos, categorias,
   máquinas e unidades), preservando o histórico.
-- **Acesso:** login real multiusuário com papéis (JWT + Argon2, modelo gsb-crm).
+- **Acesso:** login real multiusuário com papéis, via **Supabase Auth** (o Supabase gerencia
+  usuários/senhas/reset e emite o JWT; o FastAPI valida esse JWT). Papéis (`admin`/`operador`)
+  vivem numa tabela `profiles` própria.
+- **Backend/Supabase (2026-08-07):** o backend é **FastAPI** usando o **Supabase** como
+  (a) Postgres gerenciado e (b) provedor de autenticação (Supabase Auth/GoTrue). Mantém o ledger
+  event-sourced e a lógica de negócio em Python; abre mão da auth própria (JWT/Argon2) em favor
+  do Supabase Auth.
 
 ## 2. Sistema atual (o que preservar)
 
@@ -56,41 +62,49 @@ Estrutura espelhando o `gsb-crm`:
 inventory-manager/
   backend/                 # FastAPI + SQLAlchemy 2 async + Alembic + Pydantic v2
     app/
-      core/                # config, database (Postgres/SQLite fallback), security (JWT/Argon2),
+      core/                # config (inclui Supabase), database (Supabase Postgres/SQLite fallback),
+                           # security (validação do JWT do Supabase), supabase (Admin API client),
                            # deps, pagination, aio (SelectorEventLoop no Windows)
-      models/              # TableBase (UUID + created/updated) → User, Category, Item, Movement,
+      models/              # TableBase (UUID + created/updated) → Profile, Category, Item, Movement,
                            # MachineCategory, MachineModel, MachineUnit
       schemas/             # <X>Create / <X>Update / <X>Out por módulo
-      api/                 # auth, users, categories, items, movements, machines, reports
+      api/                 # auth (me), users, categories, items, movements, machines, reports
       services/            # inventory_service, machine_service, report_service  ← PORTE de Servicos.gs
       main.py
     alembic/               # migrações
-    scripts/               # seed.py (admin + demo), import_sheets.py (ETL)
-    tests/                 # pytest, SQLite in-memory
+    scripts/               # set_admin.py, import_sheets.py (ETL)
+    tests/                 # pytest, SQLite in-memory (JWT de teste assinado com o secret)
     run.py                 # entrypoint dev Windows + Postgres
   frontend/                # React 19 + TS estrito + Vite 6 + Tailwind 4
     src/
       components/ui/       # kit shadcn-style reaproveitado do gsb-crm
       components/layout/   # app-shell (sidebar + drawer mobile) + notificações
       pages/               # login, dashboard, itens, movimentar, maquinas, relatorios, usuarios
-      context/auth.tsx     # sessão + refresh
-      lib/api.ts           # fetch client com refresh single-flight + redirect 401
+      context/auth.tsx     # sessão via supabase-js (onAuthStateChange)
+      lib/supabase.ts      # client supabase-js (VITE_SUPABASE_URL + ANON_KEY)
+      lib/api.ts           # fetch client; token vem da sessão do Supabase; redirect 401
       types.ts
       index.css            # tokens de tema (preto/cinza/amarelo)
-  docker-compose.yml       # db(5433) + (redis opcional) + api + frontend
+  docker-compose.yml       # api + frontend (o banco é o Supabase; Postgres local só se quiser offline)
   serve-lan.ps1            # build do front + origem única (API serve a SPA)
   README.md / CLAUDE.md / HANDOFF.md
 ```
 
-**Deploy** (idêntico ao CRM): origem única (`FRONTEND_DIST` faz a API servir o build, sem CORS);
-LAN + Cloudflare Tunnel para acesso externo; ou nuvem Render (API+SPA) + Neon (Postgres).
+**Deploy** (origem única como no CRM): `FRONTEND_DIST` faz a API servir o build (sem CORS);
+o banco e a auth são o **Supabase** (gerenciado, acessível de qualquer host). LAN + Cloudflare
+Tunnel para acesso externo; ou nuvem (Render/host barato para o FastAPI) + Supabase.
 
 ## 4. Modelo de dados
 
-Todas as tabelas herdam `TableBase` (PK **UUID** + `created_at`/`updated_at`).
+Todas as tabelas herdam `TableBase` (PK **UUID** + `created_at`/`updated_at`), exceto `profiles`
+cuja PK é o **id do usuário no Supabase** (não gerado por nós).
 
-- **`users`** — `email` (único), `password_hash` (Argon2id), `nome`, `papel`
-  (`admin` | `operador`), `ativo`.
+- **`profiles`** — `id` (UUID = `auth.users.id` do Supabase, PK), `email`, `full_name`,
+  `role` (`admin` | `operador`, StrEnum), `is_active`, `created_at`/`updated_at`. As senhas e o
+  ciclo de login ficam **no Supabase Auth** — esta tabela só guarda papel e metadados de app.
+  Provisionamento: no primeiro request autenticado, se não existe perfil para aquele id, cria-se
+  um; se ainda não há nenhum `admin`, esse primeiro perfil vira `admin` (bootstrap), demais
+  `operador`.
 - **`categories`** — `nome`, `parent_id` (nullable), `descricao`. (peças)
 - **`items`** — `sku` (opcional, humano), `nome` (único normalizado), `category_id` (nullable),
   `unidade` (default `un`), `estoque_minimo`, `saldo_cache` (recomputável), `ativo`,
@@ -120,12 +134,15 @@ Todas as tabelas herdam `TableBase` (PK **UUID** + `created_at`/`updated_at`).
 
 ## 5. API (REST)
 
-Autenticadas por padrão (JWT bearer). Papel `admin` exigido em usuários e em ações sensíveis.
+Autenticadas por padrão (Bearer com o **JWT do Supabase**). Papel `admin` exigido em usuários
+e em ações sensíveis. Login/refresh/logout são feitos pelo **Supabase Auth** no front (não há
+endpoints de login no FastAPI).
 
 **Auth/Usuários**
-- `POST /api/v1/auth/login` → access (15 min) + refresh (7d, rotação/revogação)
-- `POST /api/v1/auth/refresh`
-- `GET /api/v1/users` · `POST /api/v1/users` (admin) · `PATCH /api/v1/users/{id}`
+- `GET /api/v1/auth/me` → perfil do usuário atual (provisiona o `profiles` no primeiro acesso)
+- `GET /api/v1/users` (admin, paginado) · `PATCH /api/v1/users/{id}` (admin: papel/ativo)
+- `POST /api/v1/users` (admin) → cria o usuário via **Supabase Admin API** (service role key) e
+  grava o `profiles` com o papel escolhido
 
 **Peças**
 - `GET /api/v1/categories` · `POST /api/v1/categories`
@@ -154,8 +171,10 @@ Erros: `HTTPException` com mensagem pt-BR; validação por Pydantic. Paginação
 
 - Tema escuro único preto/cinza + **amarelo** `oklch(0.83 0.16 90)`; verde/vermelho apenas
   semânticos. Tokens reaproveitados do `gsb-crm` (`index.css`), fonte Inter.
-- Kit `components/ui` (estilo shadcn) e `lib/api.ts` (refresh automático, redirect 401)
-  reaproveitados do gsb-crm.
+- Kit `components/ui` (estilo shadcn) reaproveitado do gsb-crm. **Login/sessão via
+  `@supabase/supabase-js`** (`signInWithPassword`, `onAuthStateChange`, `signOut`, refresh
+  automático); `lib/api.ts` obtém o access token da sessão do Supabase e o envia como Bearer ao
+  FastAPI, com redirect a `/login` em 401.
 - **Páginas:** `login`; `dashboard` (KPIs + alertas de estoque baixo); `itens` (catálogo com
   saldo e pílulas de status Bom/Alerta/Ruim/Em falta, busca/filtro); `movimentar`
   (entrada/saída multilinha, criar item novo na entrada); `histórico do item` (drawer do
@@ -178,17 +197,40 @@ Erros: `HTTPException` com mensagem pt-BR; validação por Pydantic. Paginação
 
 ## 8. Segurança e operação
 
-- JWT access curto + refresh com rotação/revogação (tabela `refresh_tokens`); Argon2id (pwdlib).
-- Rate-limit de login por IP (em memória, como no CRM); sem cadastro aberto (admin cria usuários).
-- `ENV != dev` recusa subir com `SECRET_KEY` de dev.
+- **Auth pelo Supabase (GoTrue):** senhas, sessão, rotação de refresh e rate-limit ficam no
+  Supabase. O FastAPI apenas **valida o JWT** (HS256 com o `SUPABASE_JWT_SECRET`, `aud=authenticated`;
+  gancho para JWKS/chaves assimétricas no futuro). Sem cadastro aberto — admin cria usuários via
+  Admin API.
+- **Autorização** por papel em `profiles` (`require_roles(ADMIN)`), lida a cada request.
+- `ENV != dev` recusa subir com `SECRET_KEY`/segredos de dev.
 - Origem única sem CORS na LAN; HTTPS via Cloudflare Tunnel/Tailscale (não terminado pela API).
 - Windows: `app/core/aio.py` + `run.py` (SelectorEventLoop p/ psycopg async); hot-reload só no
   modo SQLite.
+- **Segredos:** `SUPABASE_SERVICE_ROLE_KEY` só no backend (nunca no front); o front usa apenas a
+  `anon key`.
+
+## 8.1. Integração Supabase
+
+- **Env (backend):** `DATABASE_URL` (session pooler do Supabase, `postgresql+psycopg://…:5432`),
+  `SUPABASE_URL`, `SUPABASE_JWT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`. **Env (frontend):**
+  `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`.
+- **Conexão:** o FastAPI é um servidor persistente → usar o **session pooler (5432)** ou a conexão
+  direta, que suportam prepared statements. O modo transação (6543) é para serverless e exigiria
+  desativar prepared statements — evitado aqui. Migrações Alembic usam a mesma conexão direta/sessão.
+- **JWT do Supabase:** claims relevantes `sub` (uuid do usuário), `email`, `aud="authenticated"`,
+  `exp`. O `get_current_user` decodifica, resolve o `profiles` (provisiona no 1º acesso) e injeta o
+  papel.
+- **Admin API:** `POST {SUPABASE_URL}/auth/v1/admin/users` com header `apikey` + `Authorization:
+  Bearer <service_role_key>` e corpo `{email, password, email_confirm: true}` → devolve o `id` do
+  novo usuário. Encapsulado em `core/supabase.py` (injetável, mockável nos testes).
+- **Testes:** SQLite in-memory; tokens de teste assinados com o mesmo `SUPABASE_JWT_SECRET`
+  (`aud=authenticated`); o client Admin é substituído por um fake via `dependency_overrides`.
 
 ## 9. Testes
 
 - Backend: `pytest` com SQLite in-memory (no estilo dos 16 testes do CRM). Cobrir: auth
-  (rotação/revogação/rate-limit), movimentação (saldo derivado, saída insuficiente, item novo,
+  (validação do JWT do Supabase, provisionamento/bootstrap de perfil, papéis), movimentação
+  (saldo derivado, saída insuficiente, item novo,
   ajuste), unicidade de item, máquinas (unicidade de série, arquivar modelo→unidades),
   relatórios (agrupamento/períodos), ETL (replay + verificação de saldo).
 - Frontend: `tsc -b` + `vite build` limpos.
@@ -197,7 +239,7 @@ Erros: `HTTPException` com mensagem pt-BR; validação por Pydantic. Paginação
 
 0. **Scaffold** — backend + frontend a partir do padrão gsb-crm, `docker-compose`, config,
    database (Postgres/SQLite), aio/run.py, main.py, saúde da API.
-1. **Auth + usuários** — login, papéis, refresh, seed admin.
+1. **Auth + usuários** — validação do JWT do Supabase, `profiles`, bootstrap do 1º admin, Admin API.
 2. **Núcleo de peças** *(o coração)* — categorias, itens, ledger de movimentações com saldo
    derivado, ajuste, histórico.
 3. **Máquinas** — modelos + unidades.
