@@ -23,7 +23,9 @@ def admin_client(client):
 
 async def _become_admin(admin_client):
     # 1º usuário autenticado é provisionado como admin (bootstrap).
-    await admin_client.get("/api/v1/auth/me", headers=auth_headers(sub=ADMIN_SUB, email="admin@gruposb.com"))
+    await admin_client.get(
+        "/api/v1/auth/me", headers=auth_headers(sub=ADMIN_SUB, email="admin@gruposb.com")
+    )
 
 
 async def test_admin_creates_and_lists_users(admin_client):
@@ -44,7 +46,9 @@ async def test_admin_creates_and_lists_users(admin_client):
 async def test_operador_cannot_manage_users(admin_client):
     await _become_admin(admin_client)
     # Provisiona um operador (2º usuário) e usa o token dele.
-    await admin_client.get("/api/v1/auth/me", headers=auth_headers(sub=OP_SUB, email="op2@gruposb.com"))
+    await admin_client.get(
+        "/api/v1/auth/me", headers=auth_headers(sub=OP_SUB, email="op2@gruposb.com")
+    )
     resp = await admin_client.get("/api/v1/users", headers=auth_headers(sub=OP_SUB))
     assert resp.status_code == 403
 
@@ -52,9 +56,13 @@ async def test_operador_cannot_manage_users(admin_client):
 async def test_create_rejects_duplicate_email(admin_client):
     await _become_admin(admin_client)
     payload = {"email": "dup@gruposb.com", "password": "dup12345"}
-    first = await admin_client.post("/api/v1/users", headers=auth_headers(sub=ADMIN_SUB), json=payload)
+    first = await admin_client.post(
+        "/api/v1/users", headers=auth_headers(sub=ADMIN_SUB), json=payload
+    )
     assert first.status_code == 201
-    second = await admin_client.post("/api/v1/users", headers=auth_headers(sub=ADMIN_SUB), json=payload)
+    second = await admin_client.post(
+        "/api/v1/users", headers=auth_headers(sub=ADMIN_SUB), json=payload
+    )
     assert second.status_code == 409
 
 
