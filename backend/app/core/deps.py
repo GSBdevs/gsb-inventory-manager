@@ -5,6 +5,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -28,7 +29,15 @@ async def _provision_profile(db: AsyncSession, user_id: uuid.UUID, email: str) -
     role = UserRole.ADMIN if not admin_count else UserRole.OPERADOR
     profile = Profile(id=user_id, email=email or "", role=role)
     db.add(profile)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Corrida: outro request do mesmo usuário já criou o perfil. Reaproveita o existente.
+        await db.rollback()
+        existing = await db.get(Profile, user_id)
+        if existing is None:
+            raise
+        return existing
     await db.refresh(profile)
     return profile
 
