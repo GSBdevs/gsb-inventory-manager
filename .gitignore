@@ -15,6 +15,8 @@ node_modules/
 dist/
 .vite/
 *.local
+*.tsbuildinfo
+frontend/vite.config.d.ts
 
 # Env & segredos
 .env
@@ -32,3 +34,4 @@ Thumbs.db
 .idea/
 .vscode/*
 !.vscode/extensions.json
+.superpowers/

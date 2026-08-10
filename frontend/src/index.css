@@ -1,0 +1,75 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Tema escuro único — preto/cinza com destaques em amarelo (tokens shadcn/ui) */
+:root {
+  --background: oklch(0.13 0 0);
+  --foreground: oklch(0.96 0 0);
+  --card: oklch(0.17 0.004 90);
+  --card-foreground: oklch(0.96 0 0);
+  --popover: oklch(0.19 0.004 90);
+  --popover-foreground: oklch(0.96 0 0);
+  --primary: oklch(0.83 0.16 90);
+  --primary-foreground: oklch(0.18 0.03 90);
+  --secondary: oklch(0.24 0.004 90);
+  --secondary-foreground: oklch(0.92 0 0);
+  --muted: oklch(0.22 0.004 90);
+  --muted-foreground: oklch(0.66 0.006 90);
+  --accent: oklch(0.26 0.012 90);
+  --accent-foreground: oklch(0.96 0 0);
+  --destructive: oklch(0.6 0.21 25);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.72 0.17 162);
+  --warning: oklch(0.78 0.15 70);
+  --border: oklch(0.26 0.005 90);
+  --input: oklch(0.28 0.005 90);
+  --ring: oklch(0.83 0.16 90);
+  --radius: 0.625rem;
+}
+
+@theme inline {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    background-image: radial-gradient(
+      1100px 480px at 75% -10%,
+      oklch(0.83 0.16 90 / 0.055),
+      transparent 60%
+    );
+    background-attachment: fixed;
+  }
+  ::selection {
+    background: oklch(0.83 0.16 90 / 0.35);
+  }
+}
