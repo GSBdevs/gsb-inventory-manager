@@ -1,11 +1,12 @@
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/context/auth";
-import { Boxes, LayoutDashboard, LogOut } from "lucide-react";
+import { ArrowLeftRight, Boxes, LayoutDashboard, LogOut } from "lucide-react";
 import { NavLink, Outlet } from "react-router";
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
   { to: "/itens", label: "Itens", icon: Boxes, end: false },
+  { to: "/movimentar", label: "Movimentar", icon: ArrowLeftRight, end: false },
 ];
 
 export default function AppShell() {

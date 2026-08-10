@@ -3,6 +3,7 @@ import { useAuth } from "@/context/auth";
 import DashboardPage from "@/pages/dashboard";
 import LoginPage from "@/pages/login";
 import ItensPage from "@/pages/itens";
+import MovimentarPage from "@/pages/movimentar";
 import type { ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router";
 
@@ -26,6 +27,7 @@ export default function App() {
       >
         <Route path="/" element={<DashboardPage />} />
         <Route path="/itens" element={<ItensPage />} />
+        <Route path="/movimentar" element={<MovimentarPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
