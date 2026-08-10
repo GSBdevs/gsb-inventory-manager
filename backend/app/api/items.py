@@ -39,7 +39,9 @@ async def create_item(data: ItemCreate, db: DbSession, _: CurrentUser):
     nome = _norm(data.nome)
     dup = await db.scalar(select(Item).where(func.lower(Item.nome) == nome.lower()))
     if dup is not None:
-        raise HTTPException(status.HTTP_409_CONFLICT, f'Já existe uma peça com esse nome: "{nome}".')
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, f'Já existe uma peça com esse nome: "{nome}".'
+        )
     item = Item(
         nome=nome,
         sku=_norm(data.sku),

@@ -17,7 +17,9 @@ async def test_create_item_defaults_and_lists(client):
 
 
 async def test_create_item_rejects_duplicate_name_case_insensitive(client):
-    await client.post("/api/v1/items", headers=auth_headers(sub=USER), json={"nome": "Cilindro OPC"})
+    await client.post(
+        "/api/v1/items", headers=auth_headers(sub=USER), json={"nome": "Cilindro OPC"}
+    )
     dup = await client.post(
         "/api/v1/items", headers=auth_headers(sub=USER), json={"nome": "  cilindro   opc "}
     )
@@ -45,3 +47,26 @@ async def test_search_filters_by_name(client):
     resp = await client.get("/api/v1/items", headers=auth_headers(sub=USER), params={"q": "fus"})
     assert resp.json()["total"] == 1
     assert resp.json()["items"][0]["nome"] == "Fusor"
+
+
+async def test_status_reflects_stock(client):
+    created = await client.post(
+        "/api/v1/items",
+        headers=auth_headers(sub=USER),
+        json={"nome": "Toner", "estoque_minimo": 5},
+    )
+    assert created.json()["status"] == "Em falta"  # saldo inicial 0
+
+
+async def test_rename_to_own_name_variant_succeeds(client):
+    created = await client.post(
+        "/api/v1/items", headers=auth_headers(sub=USER), json={"nome": "Belt"}
+    )
+    item_id = created.json()["id"]
+    resp = await client.patch(
+        f"/api/v1/items/{item_id}",
+        headers=auth_headers(sub=USER),
+        json={"nome": "  belt "},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["nome"] == "belt"

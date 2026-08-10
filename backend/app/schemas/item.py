@@ -1,6 +1,6 @@
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.schemas.common import UTCDateTime
 
@@ -37,6 +37,18 @@ class ItemOut(BaseModel):
     ativo: bool
     observacoes: str
     created_at: UTCDateTime
+
+    @computed_field
+    @property
+    def status(self) -> str:
+        saldo, minimo = self.saldo, self.estoque_minimo
+        if saldo <= 0:
+            return "Em falta"
+        if minimo > 0 and saldo < minimo:
+            return "Ruim"
+        if minimo > 0 and saldo < minimo * 2:
+            return "Alerta"
+        return "Bom"
 
 
 class AdjustIn(BaseModel):
