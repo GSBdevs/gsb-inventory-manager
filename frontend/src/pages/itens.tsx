@@ -1,5 +1,6 @@
 import { AdjustDialog } from "@/components/adjust-dialog";
 import { ItemFormDialog } from "@/components/item-form-dialog";
+import { ItemHistoryDialog } from "@/components/item-history-dialog";
 import { StatusBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ export default function ItensPage() {
   const { data, isLoading } = useItems(q);
   const [criar, setCriar] = useState(false);
   const [ajustar, setAjustar] = useState<Item | null>(null);
+  const [historico, setHistorico] = useState<Item | null>(null);
 
   return (
     <div className="flex flex-col gap-6">
@@ -53,7 +55,14 @@ export default function ItensPage() {
           <tbody>
             {(data?.items ?? []).map((item) => (
               <tr key={item.id} className="hover:bg-accent/40">
-                <Td className="font-medium">{item.nome}</Td>
+                <Td>
+                  <button
+                    className="font-medium text-primary hover:underline"
+                    onClick={() => setHistorico(item)}
+                  >
+                    {item.nome}
+                  </button>
+                </Td>
                 <Td className="text-muted-foreground">{item.unidade}</Td>
                 <Td className="text-right">{item.saldo}</Td>
                 <Td className="text-right text-muted-foreground">{item.estoque_minimo}</Td>
@@ -80,6 +89,7 @@ export default function ItensPage() {
 
       <ItemFormDialog open={criar} onOpenChange={setCriar} />
       <AdjustDialog item={ajustar} onClose={() => setAjustar(null)} />
+      <ItemHistoryDialog item={historico} onClose={() => setHistorico(null)} />
     </div>
   );
 }
