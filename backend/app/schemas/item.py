@@ -2,6 +2,7 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
+from app.models.movement import MovementType
 from app.schemas.common import UTCDateTime
 
 
@@ -54,3 +55,54 @@ class ItemOut(BaseModel):
 class AdjustIn(BaseModel):
     novo_saldo: int = Field(ge=0)
     motivo: str = ""
+
+
+class MovementLineIn(BaseModel):
+    item_id: uuid.UUID | None = None
+    novo: bool = False
+    peca: str = ""            # nome, usado quando novo=True ou para achar por nome
+    quantidade: int = Field(gt=0)
+    categoria_id: uuid.UUID | None = None
+    unidade: str = "un"
+    estoque_minimo: int = Field(default=0, ge=0)
+    observacoes: str = ""
+    detalhes: str = ""
+
+
+class MovementBatchIn(BaseModel):
+    tipo: MovementType
+    referencia: str = ""
+    tecnico_id: uuid.UUID | None = None
+    itens: list[MovementLineIn] = Field(min_length=1)
+
+
+class MovementSaldoOut(BaseModel):
+    item_id: uuid.UUID
+    nome: str
+    saldo: int
+
+
+class MovementResultOut(BaseModel):
+    registros: int
+    novas_pecas: int
+    saldos: list[MovementSaldoOut]
+
+
+class HistoryLineOut(BaseModel):
+    id: uuid.UUID
+    data: UTCDateTime
+    tipo: MovementType
+    sinal: int
+    quantidade: int
+    tecnico: str
+    referencia: str
+    detalhes: str
+    saldo_resultante: int
+
+
+class HistoryOut(BaseModel):
+    item_id: uuid.UUID
+    nome: str
+    saldo: int
+    minimo: int
+    movimentacoes: list[HistoryLineOut]
