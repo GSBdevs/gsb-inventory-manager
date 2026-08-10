@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { ApiError } from "@/lib/api";
-import { useCreateMovement, useItems, useTechnicians } from "@/lib/queries";
+import { useCreateMovement, useCreateTechnician, useItems, useTechnicians } from "@/lib/queries";
 import type { MovementLineInput, MovementType } from "@/types";
 import { Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
@@ -26,9 +26,12 @@ export default function MovimentarPage() {
   const { data: itensPage } = useItems("");
   const { data: tecnicos } = useTechnicians();
   const criar = useCreateMovement();
+  const criarTec = useCreateTechnician();
 
   const [tipo, setTipo] = useState<MovementType>("ENTRADA");
   const [tecnicoId, setTecnicoId] = useState("");
+  const [novoTec, setNovoTec] = useState(false);
+  const [novoTecNome, setNovoTecNome] = useState("");
   const [referencia, setReferencia] = useState("");
   const [linhas, setLinhas] = useState<Linha[]>([linhaVazia()]);
 
@@ -36,6 +39,20 @@ export default function MovimentarPage() {
 
   function atualizar(i: number, patch: Partial<Linha>) {
     setLinhas((ls) => ls.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
+  }
+
+  async function criarTecnico() {
+    const nome = novoTecNome.trim();
+    if (!nome) return;
+    try {
+      const t = await criarTec.mutateAsync(nome);
+      setTecnicoId(t.id);
+      setNovoTec(false);
+      setNovoTecNome("");
+      toast.success(`Técnico "${t.nome}" criado.`);
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Falha ao criar técnico");
+    }
   }
 
   async function onSubmit() {
@@ -91,6 +108,29 @@ export default function MovimentarPage() {
               </option>
             ))}
           </Select>
+          {novoTec ? (
+            <div className="flex gap-2">
+              <Input
+                placeholder="Nome do técnico"
+                value={novoTecNome}
+                onChange={(e) => setNovoTecNome(e.target.value)}
+              />
+              <Button type="button" size="sm" onClick={criarTecnico} disabled={criarTec.isPending}>
+                Criar
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setNovoTec(false)}>
+                Cancelar
+              </Button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="text-left text-xs text-primary hover:underline"
+              onClick={() => setNovoTec(true)}
+            >
+              + Novo técnico
+            </button>
+          )}
         </div>
         <div className="flex flex-col gap-2">
           <Label>Referência</Label>
