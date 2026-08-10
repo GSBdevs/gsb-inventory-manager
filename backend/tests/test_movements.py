@@ -8,6 +8,7 @@ from app.services.inventory_service import (
     register_movement,
     status_do_saldo,
 )
+from tests.helpers import auth_headers
 
 
 def test_status_thresholds():
@@ -91,3 +92,77 @@ async def test_adjust_creates_ledger_entry(db_session):
     assert result["saldo"] == 10
     movs = (await db_session.scalars(select(Movement).where(Movement.item_id == item.id))).all()
     assert any(m.tipo == MovementType.AJUSTE_POS for m in movs)
+
+
+_U = "11111111-1111-1111-1111-111111111111"
+
+
+async def _make_tecnico(client) -> str:
+    r = await client.post("/api/v1/technicians", headers=auth_headers(sub=_U), json={"nome": "Ana"})
+    return r.json()["id"]
+
+
+async def test_api_entrada_then_saida_then_history(client):
+    tid = await _make_tecnico(client)
+    entrada = await client.post(
+        "/api/v1/movements",
+        headers=auth_headers(sub=_U),
+        json={"tipo": "ENTRADA", "tecnico_id": tid,
+              "itens": [{"novo": True, "peca": "Cilindro", "quantidade": 10}]},
+    )
+    assert entrada.status_code == 201
+    assert entrada.json()["saldos"][0]["saldo"] == 10
+
+    items = await client.get("/api/v1/items", headers=auth_headers(sub=_U))
+    item_id = items.json()["items"][0]["id"]
+
+    saida = await client.post(
+        "/api/v1/movements",
+        headers=auth_headers(sub=_U),
+        json={"tipo": "SAIDA", "tecnico_id": tid,
+              "itens": [{"item_id": item_id, "quantidade": 4}]},
+    )
+    assert saida.status_code == 201
+    assert saida.json()["saldos"][0]["saldo"] == 6
+
+    hist = await client.get(f"/api/v1/items/{item_id}/history", headers=auth_headers(sub=_U))
+    assert hist.status_code == 200
+    body = hist.json()
+    assert body["saldo"] == 6
+    assert len(body["movimentacoes"]) == 2
+    assert body["movimentacoes"][0]["tipo"] == "SAIDA"  # mais recente primeiro
+
+
+async def test_api_oversell_returns_400(client):
+    tid = await _make_tecnico(client)
+    await client.post(
+        "/api/v1/movements", headers=auth_headers(sub=_U),
+        json={"tipo": "ENTRADA", "tecnico_id": tid,
+              "itens": [{"novo": True, "peca": "Correia", "quantidade": 2}]},
+    )
+    items = await client.get("/api/v1/items", headers=auth_headers(sub=_U))
+    item_id = items.json()["items"][0]["id"]
+    resp = await client.post(
+        "/api/v1/movements", headers=auth_headers(sub=_U),
+        json={"tipo": "SAIDA", "tecnico_id": tid,
+              "itens": [{"item_id": item_id, "quantidade": 9}]},
+    )
+    assert resp.status_code == 400
+    assert "insuficiente" in resp.json()["detail"].lower()
+
+
+async def test_api_adjust_updates_balance(client):
+    tid = await _make_tecnico(client)
+    await client.post(
+        "/api/v1/movements", headers=auth_headers(sub=_U),
+        json={"tipo": "ENTRADA", "tecnico_id": tid,
+              "itens": [{"novo": True, "peca": "Rolo", "quantidade": 4}]},
+    )
+    items = await client.get("/api/v1/items", headers=auth_headers(sub=_U))
+    item_id = items.json()["items"][0]["id"]
+    resp = await client.post(
+        f"/api/v1/items/{item_id}/adjust", headers=auth_headers(sub=_U),
+        json={"novo_saldo": 10, "motivo": "inventário"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["saldo"] == 10
