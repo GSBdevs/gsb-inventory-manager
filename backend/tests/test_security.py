@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
@@ -8,7 +8,7 @@ from app.core.security import decode_supabase_jwt
 
 
 def _token(secret: str, aud: str = "authenticated", exp_delta: int = 3600) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": "11111111-1111-1111-1111-111111111111",
         "email": "user@gruposb.com",

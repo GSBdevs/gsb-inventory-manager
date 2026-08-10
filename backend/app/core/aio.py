@@ -14,5 +14,5 @@ T = TypeVar("T")
 LOOP_FACTORY = asyncio.SelectorEventLoop if sys.platform == "win32" else None
 
 
-def run(coro: Coroutine[Any, Any, T]) -> T:
+def run[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro, loop_factory=LOOP_FACTORY)

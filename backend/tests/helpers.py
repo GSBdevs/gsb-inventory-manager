@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 
@@ -13,7 +13,7 @@ def make_token(
     secret: str | None = None,
 ) -> str:
     """Emite um JWT no formato do Supabase, assinado com o secret de teste."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "sub": sub or str(uuid.uuid4()),
         "email": email,
