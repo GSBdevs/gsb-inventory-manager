@@ -90,7 +90,11 @@ async def register_movement(
             item_id = linha.get("item_id")
             if item_id is None:
                 nome = _norm(linha.get("peca"))
-                item = await db.scalar(select(Item).where(func.lower(Item.nome) == nome.lower()))
+                item = await db.scalar(
+                    select(Item)
+                    .where(func.lower(Item.nome) == nome.lower())
+                    .with_for_update()
+                )
             else:
                 item = await db.scalar(
                     select(Item).where(Item.id == item_id).with_for_update()

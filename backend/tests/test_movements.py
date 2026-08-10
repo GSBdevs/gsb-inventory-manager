@@ -16,6 +16,10 @@ def test_status_thresholds():
     assert status_do_saldo(7, 5) == "Alerta"
     assert status_do_saldo(20, 5) == "Bom"
     assert status_do_saldo(1, 0) == "Bom"
+    assert status_do_saldo(5, 5) == "Alerta"   # saldo == minimo
+    assert status_do_saldo(4, 5) == "Ruim"     # saldo == minimo - 1
+    assert status_do_saldo(10, 5) == "Bom"     # saldo == 2*minimo
+    assert status_do_saldo(9, 5) == "Alerta"   # saldo == 2*minimo - 1
 
 
 async def _tecnico(db) -> uuid.UUID:
